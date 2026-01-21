@@ -14,6 +14,7 @@ export type AppData = {
   canvas: HTMLCanvasElement;
   lightDir: { x: number; y: number; z: number };
   ambient: number;
+  showBboxes: boolean;
 };
 
 function createCanvasAutoresize({ renderer, canvas }: AppData): { autoresizeCanvas: VoidFunction } {
@@ -56,6 +57,7 @@ async function initializeApp(): Promise<AppData> {
     presentTarget: 4, // Default to Lit mode
     lightDir: { x: 0.22, y: 0.22, z: 0.56 },
     ambient: 0.3,
+    showBboxes: false,
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
 
@@ -79,6 +81,7 @@ async function initializeApp(): Promise<AppData> {
       app.presentTarget,
       lightDirArray,
       app.ambient,
+      app.showBboxes,
     );
   };
   registerRecurringAnimation(render);
