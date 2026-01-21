@@ -24,6 +24,9 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
       { text: 'Depth', value: 3 },
     ],
   });
+  settingsFolder.addBinding(app, 'showBboxes', {
+    label: 'Show Bounding Boxes',
+  });
 
   const lightingFolder = pane.addFolder({ title: 'Lighting' });
   lightingFolder.addBinding(app, 'lightDir', {

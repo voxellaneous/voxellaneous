@@ -3,7 +3,7 @@ mod primitives;
 mod scene;
 mod utils;
 
-use constants::{Vertex, CUBE_INDICES, CUBE_VERTICES};
+use constants::{Vertex, CUBE_EDGE_INDICES, CUBE_INDICES, CUBE_VERTICES};
 use scene::Scene;
 use serde::Serialize;
 use utils::map_wgpu_err;
@@ -103,6 +103,7 @@ pub struct DrawCallData {
     pub texture: wgpu::Texture,
     pub texture_view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
+    pub uniform_buffer: wgpu::Buffer,
 }
 
 #[wasm_bindgen]
@@ -126,6 +127,9 @@ pub struct Renderer {
     lighting_layout: wgpu::BindGroupLayout,
     lighting_pipeline: wgpu::RenderPipeline,
     lighting_uniform_buffer: wgpu::Buffer,
+    wireframe_pipeline: wgpu::RenderPipeline,
+    wireframe_bind_group_layout: wgpu::BindGroupLayout,
+    edge_index_buffer: wgpu::Buffer,
     static_bind_group: wgpu::BindGroup,
     gbuffer_albedo: wgpu::TextureView,
     gbuffer_normal: wgpu::TextureView,
@@ -476,6 +480,73 @@ impl Renderer {
             })
         };
 
+        // Wireframe pipeline for bounding boxes
+        let edge_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Edge Index Buffer"),
+            contents: bytemuck::cast_slice(CUBE_EDGE_INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let wireframe_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Wireframe Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let wireframe_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Wireframe Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/wireframe.wgsl").into()),
+        });
+
+        let wireframe_pipeline = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Wireframe Pipeline Layout"),
+                bind_group_layouts: &[&per_frame_bind_group_layout, &wireframe_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Wireframe Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &wireframe_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    }],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &wireframe_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
         Ok(Renderer {
             device,
             queue,
@@ -501,6 +572,9 @@ impl Renderer {
             lighting_layout,
             lighting_pipeline,
             lighting_uniform_buffer,
+            wireframe_pipeline,
+            wireframe_bind_group_layout,
+            edge_index_buffer,
             sampler,
             draw_call_array: Vec::new(),
         })
@@ -628,6 +702,7 @@ impl Renderer {
         present_target: usize,
         light_dir: &[f32],
         ambient: f32,
+        show_bboxes: bool,
     ) -> Result<(), JsValue> {
         let vp_matrix = vp_matrix
             .try_into()
@@ -812,6 +887,41 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        // 3) Optional wireframe bounding box pass
+        if show_bboxes {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Wireframe Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing content
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.wireframe_pipeline);
+            pass.set_bind_group(0, &per_frame_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.set_index_buffer(self.edge_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
+            for dc in &self.draw_call_array {
+                // Create wireframe bind group with per-draw uniforms
+                let wireframe_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &self.wireframe_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: dc.uniform_buffer.as_entire_binding(),
+                    }],
+                    label: Some("Wireframe BG"),
+                });
+                pass.set_bind_group(1, &wireframe_bg, &[]);
+                pass.draw_indexed(0..CUBE_EDGE_INDICES.len() as u32, 0, 0..1);
+            }
+        }
+
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         Ok(())
@@ -920,6 +1030,7 @@ impl Renderer {
                 texture,
                 texture_view,
                 sampler,
+                uniform_buffer,
             });
         }
 
