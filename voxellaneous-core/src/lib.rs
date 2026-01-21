@@ -42,6 +42,13 @@ struct PerDrawUniforms {
     inverse_model_matrix: [f32; 16],
 }
 
+#[repr(C, align(16))]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightingUniforms {
+    light_dir: [f32; 3],
+    ambient: f32,
+}
+
 pub fn create_render_texture_view(
     device: &wgpu::Device,
     width: u32,
@@ -116,6 +123,9 @@ pub struct Renderer {
     quad_layout_float: wgpu::BindGroupLayout,
     quad_pipeline_uint: wgpu::RenderPipeline,
     quad_pipeline_float: wgpu::RenderPipeline,
+    lighting_layout: wgpu::BindGroupLayout,
+    lighting_pipeline: wgpu::RenderPipeline,
+    lighting_uniform_buffer: wgpu::Buffer,
     static_bind_group: wgpu::BindGroup,
     gbuffer_albedo: wgpu::TextureView,
     gbuffer_normal: wgpu::TextureView,
@@ -374,6 +384,98 @@ impl Renderer {
             "Quad Pipeline Float",
         );
 
+        // Lighting pass pipeline
+        let lighting_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Lighting Uniform Buffer"),
+                contents: bytemuck::cast_slice(&[LightingUniforms {
+                    light_dir: [0.5, 0.5, 0.5],
+                    ambient: 0.1,
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let lighting_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Lighting Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let lighting_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Lighting Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/quad_lighting.wgsl").into()),
+        });
+
+        let lighting_pipeline = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Lighting Pipeline Layout"),
+                bind_group_layouts: &[&lighting_layout],
+                push_constant_ranges: &[],
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Lighting Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &lighting_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &lighting_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
         Ok(Renderer {
             device,
             queue,
@@ -396,6 +498,9 @@ impl Renderer {
             quad_layout_float,
             quad_pipeline_uint,
             quad_pipeline_float,
+            lighting_layout,
+            lighting_pipeline,
+            lighting_uniform_buffer,
             sampler,
             draw_call_array: Vec::new(),
         })
@@ -521,6 +626,8 @@ impl Renderer {
         vp_matrix: &[f32],
         view_position: &[f32],
         present_target: usize,
+        light_dir: &[f32],
+        ambient: f32,
     ) -> Result<(), JsValue> {
         let vp_matrix = vp_matrix
             .try_into()
@@ -535,6 +642,17 @@ impl Renderer {
             &self.per_frame_uniform_buffer,
             0,
             bytemuck::cast_slice(&[per_frame_uniforms]),
+        );
+
+        // Update lighting uniforms
+        let lighting_uniforms = LightingUniforms {
+            light_dir: light_dir.try_into().unwrap_or([0.5, 0.5, 0.5]),
+            ambient,
+        };
+        self.queue.write_buffer(
+            &self.lighting_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[lighting_uniforms]),
         );
 
         let per_frame_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -603,51 +721,6 @@ impl Renderer {
         let frame = self.surface.get_current_texture().map_err(map_wgpu_err)?;
         let frame_view = frame.texture.create_view(&Default::default());
         {
-            // choose which pipeline & layout
-            let (pipeline, layout, view) = match present_target {
-                0 => (
-                    &self.quad_pipeline_float,
-                    &self.quad_layout_float,
-                    &self.gbuffer_albedo,
-                ),
-                1 => (
-                    &self.quad_pipeline_float,
-                    &self.quad_layout_float,
-                    &self.gbuffer_normal,
-                ),
-                2 => (
-                    &self.quad_pipeline_uint,
-                    &self.quad_layout_uint,
-                    &self.gbuffer_linear_z,
-                ),
-                3 => (
-                    &self.quad_pipeline_float,
-                    &self.quad_layout_float,
-                    &self.depth_texture_view,
-                ),
-                _ => (
-                    &self.quad_pipeline_float,
-                    &self.quad_layout_float,
-                    &self.gbuffer_albedo,
-                ),
-            };
-
-            // create bind group
-            let quad_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-                label: Some("Quad Present BG"),
-            });
-
             // draw full‑screen
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Present Pass"),
@@ -662,8 +735,80 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 ..Default::default()
             });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &quad_bind, &[]);
+
+            if present_target == 4 {
+                // Lit mode: use lighting pipeline
+                let lighting_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &self.lighting_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.gbuffer_albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.gbuffer_normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.lighting_uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                    label: Some("Lighting BG"),
+                });
+                pass.set_pipeline(&self.lighting_pipeline);
+                pass.set_bind_group(0, &lighting_bind, &[]);
+            } else {
+                // G-buffer debug modes
+                let (pipeline, layout, view) = match present_target {
+                    0 => (
+                        &self.quad_pipeline_float,
+                        &self.quad_layout_float,
+                        &self.gbuffer_albedo,
+                    ),
+                    1 => (
+                        &self.quad_pipeline_float,
+                        &self.quad_layout_float,
+                        &self.gbuffer_normal,
+                    ),
+                    2 => (
+                        &self.quad_pipeline_uint,
+                        &self.quad_layout_uint,
+                        &self.gbuffer_linear_z,
+                    ),
+                    3 => (
+                        &self.quad_pipeline_float,
+                        &self.quad_layout_float,
+                        &self.depth_texture_view,
+                    ),
+                    _ => (
+                        &self.quad_pipeline_float,
+                        &self.quad_layout_float,
+                        &self.gbuffer_albedo,
+                    ),
+                };
+
+                let quad_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                    label: Some("Quad Present BG"),
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &quad_bind, &[]);
+            }
             pass.draw(0..3, 0..1);
         }
 

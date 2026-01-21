@@ -15,13 +15,28 @@ type GPUData = {
 export function initializeRendererTools(pane: Pane, app: AppData, profilerData: ProfilerData): void {
   const settingsFolder = pane.addFolder({ title: 'Renderer Settings' });
   settingsFolder.addBinding(app, 'presentTarget', {
-    label: 'G-Buffer Target',
+    label: 'Render Target',
     options: [
+      { text: 'Lit', value: 4 },
       { text: 'Albedo', value: 0 },
       { text: 'Normal', value: 1 },
       { text: 'Linear-Z', value: 2 },
       { text: 'Depth', value: 3 },
     ],
+  });
+
+  const lightingFolder = pane.addFolder({ title: 'Lighting' });
+  lightingFolder.addBinding(app, 'lightDir', {
+    label: 'Light Direction',
+    x: { min: -1, max: 1, step: 0.01 },
+    y: { min: -1, max: 1, step: 0.01 },
+    z: { min: -1, max: 1, step: 0.01 },
+  });
+  lightingFolder.addBinding(app, 'ambient', {
+    label: 'Ambient',
+    min: 0,
+    max: 1,
+    step: 0.01,
   });
 
   const gpuData = app.renderer.get_gpu_info() as GPUData;

@@ -12,6 +12,8 @@ export type AppData = {
   renderer: Renderer;
   presentTarget: number;
   canvas: HTMLCanvasElement;
+  lightDir: { x: number; y: number; z: number };
+  ambient: number;
 };
 
 function createCanvasAutoresize({ renderer, canvas }: AppData): { autoresizeCanvas: VoidFunction } {
@@ -48,7 +50,13 @@ async function initializeApp(): Promise<AppData> {
 
   await init({});
   const renderer = await Renderer.new(canvas);
-  const app: AppData = { renderer, canvas, presentTarget: 0 };
+  const app: AppData = {
+    renderer,
+    canvas,
+    presentTarget: 4, // Default to Lit mode
+    lightDir: { x: 0.22, y: 0.22, z: 0.56 },
+    ambient: 0.3,
+  };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
 
   const cameraModule = new CameraModule(canvas);
@@ -64,7 +72,14 @@ async function initializeApp(): Promise<AppData> {
     cameraModule.update();
     const mvpMatrix = cameraModule.calculateMVP();
 
-    renderer.render(new Float32Array(mvpMatrix), new Float32Array(cameraModule.position), app.presentTarget);
+    const lightDirArray = new Float32Array([app.lightDir.x, app.lightDir.y, app.lightDir.z]);
+    renderer.render(
+      new Float32Array(mvpMatrix),
+      new Float32Array(cameraModule.position),
+      app.presentTarget,
+      lightDirArray,
+      app.ambient,
+    );
   };
   registerRecurringAnimation(render);
 

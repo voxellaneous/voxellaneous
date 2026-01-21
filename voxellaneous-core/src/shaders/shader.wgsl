@@ -79,7 +79,15 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     var hit_voxel = vec3<u32>(0u);
     var hit_t = 0.0;
     var hit_normal = vec3<f32>(0.0);
+
+    // Determine initial entry axis from box intersection
+    let entry_t = vec3<f32>(min(tmin.x, tmax.x), min(tmin.y, tmax.y), min(tmin.z, tmax.z));
     var last_axis = 0;
+    if entry_t.y > entry_t.x && entry_t.y > entry_t.z {
+        last_axis = 1;
+    } else if entry_t.z > entry_t.x {
+        last_axis = 2;
+    }
 
     let MAX_STEPS = 256u;
     for (var i = 0u; i < MAX_STEPS; i = i + 1u) {
