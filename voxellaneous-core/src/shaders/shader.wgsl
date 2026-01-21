@@ -50,7 +50,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
 
     let dims = vec3<u32>(textureDimensions(voxel_texture, 0));
     let dims_f = vec3<f32>(dims);
-    let inv_dir = sign(dir_os) / max(abs(dir_os), vec3<f32>(1e-4));
+    let inv_dir = 1.0 / dir_os;
 
     let bounds_min = vec3<f32>(-0.5);
     let bounds_max = vec3<f32>(0.5);
@@ -70,9 +70,10 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     let ray_voxel = ray_start * dims_f + offset;
     var voxel = vec3<i32>(floor(ray_voxel));
     let step = vec3<i32>(select(vec3<f32>(-1.0), vec3<f32>(1.0), dir_os > vec3<f32>(0.0)));
-    let next_boundary = select(vec3<f32>(ceil(ray_voxel)), floor(ray_voxel), dir_os > vec3<f32>(0.0));
-    var t_max = (next_boundary - ray_voxel) * inv_dir;
-    let t_delta = abs(inv_dir);
+    let next_boundary = select(floor(ray_voxel), vec3<f32>(ceil(ray_voxel)), dir_os > vec3<f32>(0.0));
+    let inv_dir_voxel = inv_dir / dims_f;
+    var t_max = (next_boundary - ray_voxel) * inv_dir_voxel;
+    let t_delta = abs(inv_dir_voxel);
 
     var hit_idx = 0u;
     var hit_voxel = vec3<u32>(0u);
