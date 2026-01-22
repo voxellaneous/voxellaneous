@@ -20,24 +20,51 @@ type LocalState = {
   direction: Vector3;
 };
 
-type JoinPayload = {
-  peerId?: unknown;
-  peers?: unknown;
-  error?: unknown;
-};
-
-type SignalingMessage = {
-  type?: unknown;
-  roomId?: unknown;
-  payload?: unknown;
-};
-
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 
+type UnknownRecord = Record<string, unknown>;
+
+type JoinPayload = {
+  peerId?: string;
+  peers?: string[];
+  error?: string;
+};
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return value !== null && typeof value === 'object';
+}
+
 function isVector3(value: unknown): value is Vector3 {
-  if (!value || typeof value !== 'object') return false;
-  const v = value as { x?: unknown; y?: unknown; z?: unknown };
-  return typeof v.x === 'number' && typeof v.y === 'number' && typeof v.z === 'number';
+  if (!isRecord(value)) return false;
+  return typeof value.x === 'number' && typeof value.y === 'number' && typeof value.z === 'number';
+}
+
+function parseJoinPayload(payload: unknown): JoinPayload | null {
+  if (!isRecord(payload)) return null;
+  const peers = Array.isArray(payload.peers)
+    ? payload.peers.filter((id) => typeof id === 'string')
+    : undefined;
+  return {
+    peerId: typeof payload.peerId === 'string' ? payload.peerId : undefined,
+    peers,
+    error: typeof payload.error === 'string' ? payload.error : undefined,
+  };
+}
+
+function parseFromPayload(payload: unknown): { from: string; sdp?: string; candidate?: string } | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.from !== 'string') return null;
+  return {
+    from: payload.from,
+    sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
+    candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
+  };
+}
+
+function parseLeavePayload(payload: unknown): { id: string } | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.id !== 'string') return null;
+  return { id: payload.id };
 }
 
 export class NetworkClient {
@@ -103,23 +130,14 @@ export class NetworkClient {
     this.ws = ws;
 
     ws.addEventListener('open', () => {
-      // eslint-disable-next-line no-console
-      console.log('[network] connected');
       this.sendJoin();
     });
 
     ws.addEventListener('close', () => {
-      // eslint-disable-next-line no-console
-      console.log('[network] disconnected');
       this.peerId = null;
       this.remotePlayers.clear();
       this.closePeerConnections();
       if (!this.manualClose) this.scheduleReconnect();
-    });
-
-    ws.addEventListener('error', () => {
-      // eslint-disable-next-line no-console
-      console.log('[network] error');
     });
 
     ws.addEventListener('message', (event) => {
@@ -232,17 +250,18 @@ export class NetworkClient {
 
   private handleMessage(data: unknown): void {
     if (typeof data !== 'string') return;
-    let message: SignalingMessage;
+    let parsed: unknown;
     try {
-      message = JSON.parse(data);
+      parsed = JSON.parse(data);
     } catch {
       return;
     }
-    if (!message || typeof message.type !== 'string') return;
+    if (!isRecord(parsed) || typeof parsed.type !== 'string') return;
+    const message = parsed;
 
     switch (message.type) {
       case 'join':
-        this.handleJoin(message.payload as JoinPayload);
+        this.handleJoin(message.payload);
         break;
       case 'leave':
         this.handleLeave(message.payload);
@@ -263,38 +282,27 @@ export class NetworkClient {
     }
   }
 
-  private handleJoin(payload: JoinPayload): void {
-    if (!payload || typeof payload !== 'object') return;
-    if (payload.error === 'room_full') {
-      // eslint-disable-next-line no-console
-      console.log('[network] room is full');
-      return;
+  private handleJoin(payload: unknown): void {
+    const joinPayload = parseJoinPayload(payload);
+    if (!joinPayload) return;
+    if (joinPayload.error === 'room_full') return;
+    if (joinPayload.peerId && !this.peerId) {
+      this.peerId = joinPayload.peerId;
     }
-    if (Array.isArray(payload.peers)) {
-      if (typeof payload.peerId === 'string') {
-        this.peerId = payload.peerId;
-      }
-      const peers = payload.peers.filter((id) => typeof id === 'string') as string[];
-      // eslint-disable-next-line no-console
-      console.log(`[network] peers in room: ${peers.length}`);
-      for (const peerId of peers) {
+    if (joinPayload.peers) {
+      for (const peerId of joinPayload.peers) {
         this.maybeConnectToPeer(peerId);
       }
       return;
     }
-
-    if (typeof payload.peerId === 'string') {
-      const peerId = payload.peerId;
-      if (peerId !== this.peerId) {
-        this.maybeConnectToPeer(peerId);
-      }
+    if (joinPayload.peerId && joinPayload.peerId !== this.peerId) {
+      this.maybeConnectToPeer(joinPayload.peerId);
     }
   }
 
   private handleOffer(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return;
-    const data = payload as { from?: unknown; sdp?: unknown };
-    if (typeof data.from !== 'string' || typeof data.sdp !== 'string') return;
+    const data = parseFromPayload(payload);
+    if (!data || !data.sdp) return;
     const peerId = data.from;
     const pc = this.ensurePeerConnection(peerId, false);
     pc.setRemoteDescription({ type: 'offer', sdp: data.sdp })
@@ -317,9 +325,8 @@ export class NetworkClient {
   }
 
   private handleAnswer(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return;
-    const data = payload as { from?: unknown; sdp?: unknown };
-    if (typeof data.from !== 'string' || typeof data.sdp !== 'string') return;
+    const data = parseFromPayload(payload);
+    if (!data || !data.sdp) return;
     const pc = this.peerConnections.get(data.from);
     if (!pc) return;
     pc.setRemoteDescription({ type: 'answer', sdp: data.sdp }).catch(() => {
@@ -328,26 +335,35 @@ export class NetworkClient {
   }
 
   private handleIce(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return;
-    const data = payload as { from?: unknown; candidate?: unknown };
-    if (typeof data.from !== 'string' || typeof data.candidate !== 'string') return;
+    const data = parseFromPayload(payload);
+    if (!data || !data.candidate) return;
     const pc = this.peerConnections.get(data.from);
     if (!pc) return;
-    let candidate: RTCIceCandidateInit;
+    let parsedCandidate: unknown;
     try {
-      candidate = JSON.parse(data.candidate) as RTCIceCandidateInit;
+      parsedCandidate = JSON.parse(data.candidate);
     } catch {
       return;
     }
+    if (!isRecord(parsedCandidate) || typeof parsedCandidate.candidate !== 'string') return;
+    const candidate: RTCIceCandidateInit = {
+      candidate: parsedCandidate.candidate,
+      sdpMid: typeof parsedCandidate.sdpMid === 'string' ? parsedCandidate.sdpMid : undefined,
+      sdpMLineIndex:
+        typeof parsedCandidate.sdpMLineIndex === 'number' ? parsedCandidate.sdpMLineIndex : undefined,
+      usernameFragment:
+        typeof parsedCandidate.usernameFragment === 'string'
+          ? parsedCandidate.usernameFragment
+          : undefined,
+    };
     pc.addIceCandidate(candidate).catch(() => {
       // ignore
     });
   }
 
   private handleLeave(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return;
-    const data = payload as { id?: unknown };
-    if (typeof data.id !== 'string') return;
+    const data = parseLeavePayload(payload);
+    if (!data) return;
     this.cleanupPeer(data.id);
   }
 
@@ -407,10 +423,6 @@ export class NetworkClient {
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      if (state === 'connected') {
-        // eslint-disable-next-line no-console
-        console.log(`[network] rtc connected: ${peerId}`);
-      }
       if (state === 'failed' || state === 'disconnected' || state === 'closed') {
         this.cleanupPeer(peerId);
         if (!this.manualClose && this.peerId) {
@@ -434,14 +446,6 @@ export class NetworkClient {
   private setupDataChannel(peerId: string, channel: RTCDataChannel): void {
     this.dataChannels.set(peerId, channel);
 
-    channel.onopen = () => {
-      // eslint-disable-next-line no-console
-      console.log(`[network] datachannel open: ${peerId}`);
-    };
-    channel.onclose = () => {
-      // eslint-disable-next-line no-console
-      console.log(`[network] datachannel closed: ${peerId}`);
-    };
     channel.onmessage = (event) => {
       this.handleDataMessage(event.data);
     };
@@ -449,20 +453,15 @@ export class NetworkClient {
 
   private handleDataMessage(data: unknown): void {
     if (typeof data !== 'string') return;
-    let message: { type?: unknown; payload?: unknown };
+    let parsed: unknown;
     try {
-      message = JSON.parse(data);
+      parsed = JSON.parse(data);
     } catch {
       return;
     }
-    if (!message || message.type !== 'state') return;
-    const payload = message.payload as {
-      id?: unknown;
-      position?: unknown;
-      direction?: unknown;
-      timestamp?: unknown;
-    };
-    if (typeof payload.id !== 'string') return;
+    if (!isRecord(parsed) || parsed.type !== 'state') return;
+    const payload = isRecord(parsed.payload) ? parsed.payload : null;
+    if (!payload || typeof payload.id !== 'string') return;
     if (payload.id === this.peerId) return;
     if (!isVector3(payload.position) || !isVector3(payload.direction)) return;
     if (typeof payload.timestamp !== 'number') return;

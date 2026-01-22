@@ -8,17 +8,7 @@ type Peer = {
   lastSeen: number;
 };
 
-type SignalingMessage = {
-  type?: unknown;
-  roomId?: unknown;
-  payload?: unknown;
-};
-
-type TargetPayload = {
-  to?: unknown;
-  sdp?: unknown;
-  candidate?: unknown;
-};
+type UnknownRecord = Record<string, unknown>;
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
 const DEFAULT_ROOM = process.env.DEFAULT_ROOM || 'lobby';
@@ -44,12 +34,16 @@ function generatePeerId(): string {
   return `peer-${peerCounter}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function safeJsonParse(data: string): SignalingMessage | null {
+function safeJsonParse(data: string): unknown | null {
   try {
-    return JSON.parse(data) as SignalingMessage;
+    return JSON.parse(data);
   } catch {
     return null;
   }
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return value !== null && typeof value === 'object';
 }
 
 function sendJson(ws: WebSocket, message: unknown): void {
@@ -96,8 +90,14 @@ function removePeer(peer: Peer, reason: string): void {
   peer.roomId = null;
 }
 
-function handleJoin(peer: Peer, message: SignalingMessage): void {
-  const roomId = (message.roomId || DEFAULT_ROOM).toString();
+function coerceRoomId(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return value.toString();
+  return DEFAULT_ROOM;
+}
+
+function handleJoin(peer: Peer, message: UnknownRecord): void {
+  const roomId = coerceRoomId(message.roomId);
   const room = getRoom(roomId);
 
   if (room.size >= MAX_PEERS) {
@@ -143,11 +143,12 @@ function handleJoin(peer: Peer, message: SignalingMessage): void {
   );
 }
 
-function handleLeave(peer: Peer, message: SignalingMessage): void {
+function handleLeave(peer: Peer, message: UnknownRecord): void {
   if (!peer.peerId || !peer.roomId) return;
   peer.lastSeen = Date.now();
-  const payload = message.payload as { reason?: unknown } | undefined;
-  const reason = payload && typeof payload.reason === 'string' ? payload.reason : 'client_close';
+  const payload = isRecord(message.payload) ? message.payload : undefined;
+  const reason =
+    payload && typeof payload.reason === 'string' ? payload.reason : 'client_close';
   removePeer(peer, reason);
 }
 
@@ -163,10 +164,20 @@ function handlePing(peer: Peer): void {
   });
 }
 
-function forwardToPeer(peer: Peer, message: SignalingMessage, type: string): void {
+function parseTargetPayload(payload: unknown): { to: string; sdp?: string; candidate?: string } | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.to !== 'string') return null;
+  return {
+    to: payload.to,
+    sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
+    candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
+  };
+}
+
+function forwardToPeer(peer: Peer, message: UnknownRecord, type: string): void {
   if (!peer.peerId || !peer.roomId) return;
-  const payload = message.payload as TargetPayload | undefined;
-  if (!payload || typeof payload.to !== 'string') return;
+  const payload = parseTargetPayload(message.payload);
+  if (!payload) return;
 
   const room = rooms.get(peer.roomId);
   if (!room) return;
@@ -179,8 +190,8 @@ function forwardToPeer(peer: Peer, message: SignalingMessage, type: string): voi
     payload: {
       from: peer.peerId,
       to: payload.to,
-      sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
-      candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
+      sdp: payload.sdp,
+      candidate: payload.candidate,
     },
   });
 }
@@ -188,7 +199,7 @@ function forwardToPeer(peer: Peer, message: SignalingMessage, type: string): voi
 function handleMessage(peer: Peer, data: WebSocket.RawData): void {
   const text = typeof data === 'string' ? data : data.toString('utf8');
   const message = safeJsonParse(text);
-  if (!message || typeof message.type !== 'string') {
+  if (!message || !isRecord(message) || typeof message.type !== 'string') {
     return;
   }
 
@@ -253,7 +264,4 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL_MS);
 
-server.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`WS server listening on :${PORT}`);
-});
+server.listen(PORT);
