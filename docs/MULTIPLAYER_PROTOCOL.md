@@ -1,40 +1,40 @@
-# Multiplayer (P2P over WebSocket) — Сетевой слой и протокол
+# Multiplayer (P2P over WebSocket) - Network Layer and Protocol
 
-## Цель
-Минимальный протокол обмена позициями игроков через WebSocket‑сервер (сигналинг/релей).
+## Purpose
+Minimal protocol for exchanging player positions through a WebSocket server (signaling/relay).
 
-## Топология
-- Транспорт: WebSocket.
-- Сервер: принимает подключения, раздает `peerId`, ретранслирует `state` в рамках комнаты.
-- Клиенты напрямую друг с другом не общаются.
+## Topology
+- Transport: WebSocket.
+- Server: accepts connections, assigns `peerId`, relays `state` within a room.
+- Clients do not communicate directly with each other.
 
-## Модель сессии
-- **roomId**: строка, клиент указывает комнату при подключении (`hello`).
-- **peerId**: строка, выдается сервером при `hello/hello-ack`.
-- **Подключение**:
-  1) Клиент открывает WS.
-  2) Отправляет `hello` с `roomId`.
-  3) Сервер отвечает `hello` (ack) с присвоенным `peerId` и текущим списком peers (опционально).
-- **Отключение**:
-  - Клиент отправляет `leave`, затем закрывает WS.
-  - Сервер рассылает `leave` всем в комнате.
+## Session model
+- **roomId**: string, provided by the client on connection (`hello`).
+- **peerId**: string, assigned by the server on `hello/hello-ack`.
+- **Connect**:
+  1) Client opens WS.
+  2) Sends `hello` with `roomId`.
+  3) Server replies `hello` (ack) with assigned `peerId` and current peers list (optional).
+- **Disconnect**:
+  - Client sends `leave`, then closes WS.
+  - Server broadcasts `leave` to the room.
 - **Timeout**:
-  - Клиент отправляет `ping` каждые 5 секунд.
-  - Если сервер не получает `ping`/`state` от peer > 15 секунд, он удаляет peer и рассылает `leave`.
+  - Client sends `ping` every 5 seconds.
+  - If the server does not receive `ping`/`state` from a peer for > 15 seconds, it removes the peer and broadcasts `leave`.
 
-## Частота обновлений
-- Рекомендуемая частота: **10–20 сообщений/сек** (`state`).
-- Клиент не должен превышать 20 `state`/сек.
+## Update rate
+- Recommended rate: **10-20 messages/sec** (`state`).
+- Client should not exceed 20 `state`/sec.
 
-## Контракт данных позиции
-`state` содержит:
+## Position data contract
+`state` contains:
 - `id`: `string` (peerId).
 - `position`: `{ x: number, y: number, z: number }`.
-- `direction`: `{ x: number, y: number, z: number }` (нормализованный вектор взгляда/движения).
-- `timestamp`: `number` (ms, `Date.now()` на стороне отправителя).
+- `direction`: `{ x: number, y: number, z: number }` (normalized view/movement vector).
+- `timestamp`: `number` (ms, `Date.now()` on sender).
 
-## Формат сообщений (JSON)
-Все сообщения имеют общий формат:
+## Message format (JSON)
+All messages share the common format:
 ```
 {
   "type": "<message-type>",
@@ -43,7 +43,7 @@
 }
 ```
 
-### `hello` (client → server)
+### `hello` (client -> server)
 ```
 {
   "type": "hello",
@@ -54,7 +54,7 @@
 }
 ```
 
-### `hello` (server → client, ack)
+### `hello` (server -> client, ack)
 ```
 {
   "type": "hello",
@@ -66,7 +66,7 @@
 }
 ```
 
-### `state` (client → server → room)
+### `state` (client -> server -> room)
 ```
 {
   "type": "state",
@@ -80,7 +80,7 @@
 }
 ```
 
-### `leave` (client → server) / (server → room)
+### `leave` (client -> server) / (server -> room)
 ```
 {
   "type": "leave",
@@ -92,7 +92,7 @@
 }
 ```
 
-### `ping` (client → server)
+### `ping` (client -> server)
 ```
 {
   "type": "ping",
@@ -103,7 +103,7 @@
 }
 ```
 
-### `pong` (server → client)
+### `pong` (server -> client)
 ```
 {
   "type": "pong",
@@ -114,8 +114,7 @@
 }
 ```
 
-## Поведение при подключении/отключении
-- После `hello` сервер обязан вернуть `peerId`.
-- Сервер обязан расслать `leave` по факту закрытия WS или по таймауту.
-- Клиент должен удалять удаленного игрока при `leave`.
-
+## Connect/disconnect behavior
+- After `hello`, the server must return a `peerId`.
+- The server must broadcast `leave` on WS close or timeout.
+- The client must remove the remote player on `leave`.

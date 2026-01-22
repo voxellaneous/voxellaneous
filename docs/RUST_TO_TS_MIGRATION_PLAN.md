@@ -1,136 +1,136 @@
-# План миграции Rust → TypeScript (WASM → чистый TS)
+# Rust -> TypeScript Migration Plan (WASM -> pure TS)
 
-Ниже: пошаговый план и список конкретных точек входа, которые нужно переписать.
-
----
-
-## 1) Картина зависимости сейчас
-
-- Frontend (`voxellaneous-web`) импортирует WASM пакет `voxellaneous-core` и использует его `Renderer`.
-- `voxellaneous-core` — Rust‑ядро рендера с WebGPU (`wgpu`), собирается `wasm-pack`.
-- Главная точка входа фронта — `voxellaneous-web/src/main.ts`.
-
-Цель миграции: убрать Rust/WASM, перенести рендер‑логику в TS (WebGPU или другой backend), оставить единый TS‑проект.
+Below is a step-by-step plan and specific entry points that need to be rewritten.
 
 ---
 
-## 2) Конкретные точки входа, которые надо переписать (минимум)
+## 1) Current dependency map
 
-### В `voxellaneous-web`
+- Frontend (`voxellaneous-web`) imports the WASM package `voxellaneous-core` and uses its `Renderer`.
+- `voxellaneous-core` is the Rust rendering core with WebGPU (`wgpu`), built with `wasm-pack`.
+- The main frontend entry point is `voxellaneous-web/src/main.ts`.
+
+Migration goal: remove Rust/WASM, move render logic to TS (WebGPU or another backend), and keep a single TS project.
+
+---
+
+## 2) Specific entry points to rewrite (minimum)
+
+### In `voxellaneous-web`
 1) `voxellaneous-web/src/main.ts`
-   - Сейчас:
+   - Current:
      - `import init, { Renderer } from 'voxellaneous-core';`
      - `await init({});`
      - `const renderer = await Renderer.new(canvas);`
      - `renderer.upload_scene(scene);`
-     - `renderer.render(...)` и `renderer.resize(...)`
-   - Нужно заменить на чисто TS‑реализацию рендера.
+     - `renderer.render(...)` and `renderer.resize(...)`
+   - Replace with a pure TS renderer implementation.
 
 2) `voxellaneous-web/src/scene.ts`
-   - Интерфейс `Scene` используется как контракт данных между TS и Rust.
-   - Его нужно сохранить/адаптировать под новый TS‑рендер.
+   - The `Scene` interface is used as the data contract between TS and Rust.
+   - Keep/adapt it for the new TS renderer.
 
 3) `voxellaneous-web/src/renderer/editor.ts`
-   - UI‑инструменты для переключения рендера/буферов завязаны на `Renderer` (presentTarget и т.п.).
-   - Привязки/типы нужно обновить под новый TS‑renderer.
+   - UI tools for switching render targets/buffers depend on `Renderer` (presentTarget, etc.).
+   - Update bindings/types for the new TS renderer.
 
 4) `voxellaneous-web/package.json`
-   - Удалить зависимость `"voxellaneous-core": "file:../voxellaneous-core/pkg"`.
+   - Remove dependency on `"voxellaneous-core": "file:../voxellaneous-core/pkg"`.
 
 
-### В `voxellaneous-core` (наследуемая логика)
-То, что нужно переписать в TS (функционально):
+### In `voxellaneous-core` (logic to port)
+What must be reimplemented in TS functionally:
 
 1) `voxellaneous-core/src/lib.rs`
-   - Здесь фактически весь рендер:
-     - Инициализация WebGPU устройства
-     - Создание пайплайнов и буферов
+   - Essentially the entire renderer:
+     - WebGPU device initialization
+     - Pipeline and buffer creation
      - `Renderer::new(...)`
      - `Renderer::render(...)`
      - `Renderer::upload_scene(...)`
      - `Renderer::resize(...)`
-   - В TS это станет `Renderer` класс/модуль.
+   - In TS, this becomes a `Renderer` class/module.
 
 2) `voxellaneous-core/src/scene.rs`
-   - Типы сцены Rust (соответствие `voxellaneous-web/src/scene.ts`).
-   - Нужно портировать логику загрузки данных сцены (палитра, воксели).
+   - Rust scene types (mirror `voxellaneous-web/src/scene.ts`).
+   - Port scene data loading logic (palette, voxels).
 
 3) `voxellaneous-core/src/shaders/*.wgsl`
-   - Шейдеры сохраняются (они уже WebGPU/WGSL).
-   - Их можно оставить как есть, но перенести загрузку/компиляцию в TS.
+   - Shaders can be kept (already WebGPU/WGSL).
+   - Move loading/compilation to TS.
 
 ---
 
-## 3) План миграции (рекомендованная последовательность)
+## 3) Migration plan (recommended sequence)
 
-### Этап 0 — подготовка
-- Зафиксировать текущую версию и точку запуска (что сейчас работает).
-- Убедиться, что `voxellaneous-web` запускается и рендерит сцену.
+### Stage 0 - preparation
+- Pin current version and startup flow (what works today).
+- Ensure `voxellaneous-web` runs and renders the scene.
 
-### Этап 1 — разрыв зависимости от Rust
-- Удалить wasm‑инициализацию из `main.ts`.
-- Ввести временный TS‑Renderer с тем же API:
+### Stage 1 - break Rust dependency
+- Remove wasm initialization from `main.ts`.
+- Introduce a temporary TS Renderer with the same API:
   - `new(canvas)`
   - `render(mvp, cameraPos, presentTarget)`
   - `resize(w, h)`
   - `upload_scene(scene)`
-- На этом этапе он может быть “пустышкой”, лишь бы приложение запускалось без Rust.
+- This stage can be a stub as long as the app runs without Rust.
 
-### Этап 2 — порт рендера на TS WebGPU
-- Реализовать инициализацию WebGPU в TS.
-- Перенести:
-  - создание surface/context
-  - пайплайны
-  - буферы
-  - загрузку шейдеров WGSL
-- Запустить минимальный pass (например, full‑screen quad) — проверить, что рендер вообще работает.
+### Stage 2 - port rendering to TS WebGPU
+- Implement WebGPU initialization in TS.
+- Port:
+  - surface/context creation
+  - pipelines
+  - buffers
+  - WGSL shader loading
+- Run a minimal pass (e.g., full-screen quad) to confirm rendering works.
 
-### Этап 3 — порт логики сцены
-- Перенести `upload_scene`:
-  - загрузка палитры
-  - загрузка 3D‑текстур вокселей
-- Важно: учесть требования `bytes_per_row` и правильный padding.
+### Stage 3 - port scene logic
+- Port `upload_scene`:
+  - palette upload
+  - voxel 3D texture upload
+- Important: handle `bytes_per_row` requirements and proper padding.
 
-### Этап 4 — полноценный рендер
-- Перенести логику render‑цикла из Rust:
-  - G‑Buffer passes
-  - present‑pass
-- Привести поведение к текущему виду.
+### Stage 4 - full render
+- Port render loop logic from Rust:
+  - G-Buffer passes
+  - present pass
+- Match current behavior.
 
-### Этап 5 — чистка репозитория
-- Удалить `voxellaneous-core/` полностью (или архивировать).
-- Удалить все упоминания `wasm-pack` в инструкциях.
-- Убедиться, что нет ссылок на `voxellaneous-core/pkg`.
+### Stage 5 - repo cleanup
+- Remove `voxellaneous-core/` entirely (or archive it).
+- Remove all `wasm-pack` references from docs.
+- Ensure no references to `voxellaneous-core/pkg` remain.
 
 ---
 
-## 4) Конкретные участки API, которые нужно сохранить (или заменить)
+## 4) API surface to keep (or replace)
 
-Сейчас фронт ожидает такие методы/сигнатуры:
+The frontend currently expects these signatures:
 
 - `Renderer.new(canvas: HTMLCanvasElement): Promise<Renderer>`
 - `renderer.render(mvp: Float32Array, cameraPos: Float32Array, presentTarget: number): void`
 - `renderer.resize(width: number, height: number): void`
 - `renderer.upload_scene(scene: Scene): void`
 
-В TS‑версии можно сохранить эти сигнатуры, чтобы не переписывать фронт.
+In the TS version, you can keep these signatures to avoid rewriting the frontend.
 
 ---
 
-## 5) Быстрый список файлов, которые трогаем
+## 5) Quick file list
 
-- `voxellaneous-web/src/main.ts` — убрать wasm‑инициализацию, подключить TS‑renderer
-- `voxellaneous-web/src/scene.ts` — оставить/адаптировать интерфейсы сцены
-- `voxellaneous-web/src/renderer/*` — часть логики UI зависит от Renderer
-- `voxellaneous-web/package.json` — убрать wasm‑зависимость
+- `voxellaneous-web/src/main.ts` - remove wasm init, plug in TS renderer
+- `voxellaneous-web/src/scene.ts` - keep/adapt scene interfaces
+- `voxellaneous-web/src/renderer/*` - some UI logic depends on Renderer
+- `voxellaneous-web/package.json` - remove wasm dependency
 
-- `voxellaneous-core/src/lib.rs` — функционально переписать в TS
-- `voxellaneous-core/src/scene.rs` — типы/структуры сцены
-- `voxellaneous-core/src/shaders/*.wgsl` — использовать в TS
+- `voxellaneous-core/src/lib.rs` - port functionality to TS
+- `voxellaneous-core/src/scene.rs` - scene types/structures
+- `voxellaneous-core/src/shaders/*.wgsl` - use in TS
 
 ---
 
-## 6) Предлагаемая новая структура TS‑рендера
+## 6) Proposed TS renderer structure
 
 ```
 voxellaneous-web/src/renderer/
@@ -148,8 +148,7 @@ voxellaneous-web/src/renderer/
 
 ---
 
-Если хочешь, могу:
-- уточнить список точек входа после глубокого просмотра кода;
-- подготовить skeleton TS‑Renderer с WebGPU;
-- начать перенос по шагам.
-
+If you want, I can:
+- refine entry points after a deeper code review;
+- prepare a skeleton TS Renderer with WebGPU;
+- start porting step by step.

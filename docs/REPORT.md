@@ -1,131 +1,130 @@
-# Voxellaneous Report (RU)
+# Voxellaneous Report (EN)
 
-## Общее описание
-Репозиторий разделён на две части:
+## Overview
+The repository is split into two parts:
 
-- `voxellaneous-core/` — ядро рендера на Rust → WASM с `wgpu`.
-- `voxellaneous-web/` — веб‑фронтенд на Vite + TypeScript, который поднимает рендер, создаёт сцену и GUI.
+- `voxellaneous-core/` - rendering core in Rust -> WASM using `wgpu`.
+- `voxellaneous-web/` - web frontend on Vite + TypeScript that boots the renderer, builds the scene, and provides GUI.
 
-### Сборка/запуск
-- Ядро (WASM): `wasm-pack build --target web`
-- Веб: `npm install`, `npm run dev`
+### Build/run
+- Core (WASM): `wasm-pack build --target web`
+- Web: `npm install`, `npm run dev`
 
-### Поток данных
-- TS создаёт `Scene` (палитра + объекты) и вызывает `renderer.upload_scene(scene)`.
-- Rust упаковывает палитру в uniform, а воксели загружает в 3D‑текстуры по объектам.
-- Рендер‑цикл пишет per‑frame uniform, рисует G‑Buffer, затем выводит выбранный G‑Buffer через full‑screen pass.
+### Data flow
+- TS creates a `Scene` (palette + objects) and calls `renderer.upload_scene(scene)`.
+- Rust packs the palette into a uniform and uploads voxels into 3D textures per object.
+- The render loop writes per-frame uniforms, draws the G-Buffer, then presents the selected target via a full-screen pass.
 
-## Текущие проблемы / риски
+## Current issues / risks
 
-### 1) Загрузка 3D‑текстур нарушает требование `bytes_per_row`
-**Где**: `voxellaneous-core/src/lib.rs` в `upload_scene`, `queue.write_texture(...)`.
+### 1) 3D texture upload violates `bytes_per_row`
+**Where**: `voxellaneous-core/src/lib.rs` in `upload_scene`, `queue.write_texture(...)`.
 
-**Почему это проблема**: WebGPU требует, чтобы `bytes_per_row` был кратен 256. Сейчас используется `bytes_per_row: Some(nx)`, где `nx` — ширина воксельного объёма. В демонстрационной сцене размеры 10/80/100 не кратны 256, что нарушает требования.
+**Why**: WebGPU requires `bytes_per_row` to be a multiple of 256. The code uses `bytes_per_row: Some(nx)` where `nx` is the voxel width. In the demo scene sizes 10/80/100 are not multiples of 256.
 
-**Эффект**: Загрузка может быть отвергнута драйвером или привести к некорректному рендеру.
+**Effect**: Upload can be rejected by the driver or produce incorrect rendering.
 
-**Как исправить**: Делать паддинг строк до 256 байт и загружать через staging buffer (или `copy_buffer_to_texture`).
+**Fix**: Pad rows to 256 bytes and upload via a staging buffer (or `copy_buffer_to_texture`).
 
 ---
 
-### 2) Отображение depth‑буфера некорректно
-**Где**:
-- `voxellaneous-core/src/lib.rs` (создание depth и present pass).
+### 2) Depth buffer presentation is incorrect
+**Where**:
+- `voxellaneous-core/src/lib.rs` (depth creation and present pass).
 - `voxellaneous-core/src/shaders/quad_float.wgsl`.
 
-**Почему это проблема**:
-- Depth‑текстура создана только с `RENDER_ATTACHMENT`, но затем читается, что требует `TEXTURE_BINDING`.
-- Depth нельзя корректно читать как `texture_2d<f32>` с обычным sampler.
+**Why**:
+- Depth texture is created only with `RENDER_ATTACHMENT` but later sampled, which requires `TEXTURE_BINDING`.
+- Depth cannot be correctly sampled as `texture_2d<f32>` with a regular sampler.
 
-**Эффект**: При `presentTarget = 3` будет ошибка валидации или чёрный экран.
+**Effect**: With `presentTarget = 3` you get a validation error or black screen.
 
-**Как исправить**: Создать отдельный pipeline для depth (`texture_2d_depth` + comparison sampler) или копировать depth в float‑текстуру перед показом. Обновить usage‑флаги.
-
----
-
-### 3) Лимит шагов ray‑march может быть недостаточным
-**Где**: `voxellaneous-core/src/shaders/shader.wgsl`, `MAX_STEPS = 256`.
-
-**Почему это проблема**: Для диагональных лучей в объёмах ~100³ может потребоваться больше 256 шагов. Это вызовет преждевременный выход и пропуски геометрии.
-
-**Эффект**: Визуальные артефакты при некоторых ракурсах.
-
-**Как исправить**: Увеличить лимит или вычислять разумный верхний предел по размеру объёма и направлению луча.
+**Fix**: Create a dedicated depth pipeline (`texture_2d_depth` + comparison sampler) or copy depth into a float texture before showing. Update usage flags.
 
 ---
 
-### 4) Скорость камеры зависит от FPS
-**Где**: `voxellaneous-web/src/camera.ts`.
+### 3) Ray-march step limit may be too low
+**Where**: `voxellaneous-core/src/shaders/shader.wgsl`, `MAX_STEPS = 256`.
 
-**Почему это проблема**: Движение камеры на фиксированную величину за кадр делает скорость разной на разных машинах.
+**Why**: Diagonal rays in volumes around ~100^3 can require more than 256 steps. This causes early exit and missing geometry.
 
-**Эффект**: Нестабильная и непредсказуемая скорость перемещения.
+**Effect**: Visual artifacts at some camera angles.
 
-**Как исправить**: Умножать скорость на delta time (секунды между кадрами).
-
----
-
-### 5) Аллокации bind‑group каждый кадр
-**Где**: `voxellaneous-core/src/lib.rs`, `render()`.
-
-**Почему это проблема**: `per_frame_bind_group` и `quad_bind` создаются каждый кадр, что даёт лишние аллокации.
-
-**Эффект**: Лишняя нагрузка и потенциальная деградация FPS на слабых системах.
-
-**Как исправить**: Кэшировать bind‑groups, обновляя только буферы.
+**Fix**: Increase the limit or compute a reasonable upper bound based on volume size and ray direction.
 
 ---
 
-### 6) Нет проверки консистентности данных сцены
-**Где**: `voxellaneous-core/src/lib.rs` в `upload_scene`.
+### 4) Camera speed depends on FPS
+**Where**: `voxellaneous-web/src/camera.ts`.
 
-**Почему это проблема**: Не проверяется соответствие `voxels.len()` размерам `dims`, а также корректность индексов палитры.
+**Why**: Moving a fixed amount per frame makes speed vary across machines.
 
-**Эффект**: Некорректная загрузка данных, возможные ошибки рендера.
+**Effect**: Unstable and unpredictable movement speed.
 
-**Как исправить**: Добавить валидацию перед загрузкой и возвращать ошибку в JS.
+**Fix**: Multiply speed by delta time (seconds between frames).
 
 ---
 
-### 7) Потенциальный риск несоответствия layout палитры
-**Где**:
+### 5) Bind-group allocations every frame
+**Where**: `voxellaneous-core/src/lib.rs`, `render()`.
+
+**Why**: `per_frame_bind_group` and `quad_bind` are created every frame, causing extra allocations.
+
+**Effect**: Unnecessary load and potential FPS drop on weaker systems.
+
+**Fix**: Cache bind-groups and only update buffers.
+
+---
+
+### 6) No scene data consistency checks
+**Where**: `voxellaneous-core/src/lib.rs` in `upload_scene`.
+
+**Why**: There is no validation that `voxels.len()` matches `dims`, or that palette indices are valid.
+
+**Effect**: Incorrect uploads and rendering errors.
+
+**Fix**: Add validation before upload and return an error to JS.
+
+---
+
+### 7) Potential palette layout mismatch risk
+**Where**:
 - `voxellaneous-core/src/lib.rs`: `StaticUniforms { color_palette: [u32; 256] }`.
 - `voxellaneous-core/src/shaders/shader.wgsl`: `palette: array<vec4<u32>, 64>`.
 
-**Почему это риск**: Это совпадает по размеру (64×4=256), но зависит от конкретных правил выравнивания и упаковки.
+**Why**: Size matches (64x4=256) but depends on alignment and packing rules.
 
-**Эффект**: Потенциальная порча цветов при изменениях структуры.
+**Effect**: Possible color corruption if the struct changes.
 
-**Как исправить**: Зафиксировать layout в документации или привести host‑данные к структуре `vec4<u32>`.
+**Fix**: Document the layout or adjust host data to `vec4<u32>` structure.
 
 ---
 
-### 8) Нет автоматических тестов
-**Где**: весь репозиторий.
+### 8) No automated tests
+**Where**: whole repository.
 
-**Почему это проблема**: Нет тестов/CI, которые ловили бы регрессии в сцене или рендере.
+**Why**: No tests/CI to catch regressions in the scene or renderer.
 
-**Эффект**: Ошибки обнаруживаются только вручную.
+**Effect**: Bugs are discovered only manually.
 
-**Как исправить**: Добавить минимальные тесты генерации сцены и проверки консистентности данных.
+**Fix**: Add minimal tests for scene generation and data consistency.
 
-## Краткий разбор модулей
+## Module quick overview
 
 ### `voxellaneous-core/`
-- `Renderer` создаёт device/surface, G‑Buffer, pipeline и рендерит объекты.
-- Воксельные объекты рендерятся через ray‑march в `shader.wgsl`.
-- `quad_float.wgsl` и `quad_uint.wgsl` отвечают за показ целевого буфера на экран.
+- `Renderer` creates device/surface, G-Buffer, pipeline and renders objects.
+- Voxel objects are rendered via ray-march in `shader.wgsl`.
+- `quad_float.wgsl` and `quad_uint.wgsl` present the selected target to the screen.
 
 ### `voxellaneous-web/`
-- `main.ts` поднимает WASM, создаёт камеру, запускает rAF‑цикл.
-- `camera.ts` реализует pointer‑lock управление.
-- `editor.ts` + `renderer/editor.ts` дают UI для выбора G‑Buffer и просмотра данных GPU.
-- `tests/cornell-box.ts` генерирует тестовую сцену (Cornell box).
+- `main.ts` boots WASM, creates the camera, starts the rAF loop.
+- `camera.ts` implements pointer-lock controls.
+- `editor.ts` + `renderer/editor.ts` provide UI for selecting G-Buffer targets and inspecting GPU data.
+- `tests/cornell-box.ts` generates a test scene (Cornell box).
 
 ### `ai-development-framework/`
-- Жёстко регламентирует процесс разработки стадиями и логированием.
+- Strictly governs the development process with stages and logging.
 
-## Дополнительные заметки
-- `README.md` минимален, предполагает ручной порядок сборки.
-- Vite‑конфиг расширяет доступ к корню репозитория для подключения локального WASM.
-
+## Additional notes
+- `README.md` is minimal and assumes manual build steps.
+- The Vite config extends access to the repo root to load local WASM.

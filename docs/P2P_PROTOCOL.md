@@ -1,30 +1,30 @@
-# P2P (WebRTC DataChannel) — Архитектура и сигналинг
+# P2P (WebRTC DataChannel) - Architecture and Signaling
 
-## Цель
-Перейти от WS‑релея к P2P‑обмену через WebRTC DataChannel. WS‑сервер используется только для сигналинга.
+## Purpose
+Move from a WS relay to P2P exchange via WebRTC DataChannel. The WS server is used only for signaling.
 
-## Топология
-- **Mesh**: каждый клиент устанавливает соединение с каждым.
-- **Ограничения**: рекомендуется максимум 8 peers в комнате (из‑за квадратичного роста соединений).
-- **Комнаты**: roomId задается клиентом при `join`.
+## Topology
+- **Mesh**: each client connects to every other client.
+- **Limits**: recommended max 8 peers per room (quadratic connection growth).
+- **Rooms**: roomId is provided by the client on `join`.
 
-## Роль WS‑сервера
-- Только сигналинг: `join/leave/offer/answer/ice/ping/pong`.
-- Нет ретрансляции `state` и любых игровых данных.
+## WS server role
+- Signaling only: `join/leave/offer/answer/ice/ping/pong`.
+- No relay of `state` or any gameplay data.
 
-## Состояния соединения
-- `connecting`: установление WS и WebRTC, ожидание offer/answer/ICE.
-- `connected`: DataChannel открыт и принимает/отправляет `state`.
-- `disconnected`: соединение разорвано, DataChannel закрыт.
-- `reconnecting`: попытки восстановить WS/RTC.
+## Connection states
+- `connecting`: establishing WS and WebRTC, waiting for offer/answer/ICE.
+- `connected`: DataChannel open and sending/receiving `state`.
+- `disconnected`: connection is down, DataChannel closed.
+- `reconnecting`: attempting to restore WS/RTC.
 
-## Политика таймаутов
-- Клиент отправляет `ping` на WS раз в 5 секунд.
-- Если от peer нет signaling‑сообщений > 15 секунд — peer считается отключенным, выполняется `leave`.
-- При разрыве DataChannel — переход в `reconnecting`.
+## Timeout policy
+- Client sends WS `ping` every 5 seconds.
+- If no signaling from a peer for > 15 seconds, the peer is considered disconnected and `leave` is issued.
+- On DataChannel drop, transition to `reconnecting`.
 
-## Сигналинговые сообщения (JSON)
-Общий формат:
+## Signaling messages (JSON)
+Common format:
 ```
 {
   "type": "<message-type>",
@@ -33,7 +33,7 @@
 }
 ```
 
-### `join` (client → server)
+### `join` (client -> server)
 ```
 {
   "type": "join",
@@ -44,7 +44,7 @@
 }
 ```
 
-### `leave` (client → server → room)
+### `leave` (client -> server -> room)
 ```
 {
   "type": "leave",
@@ -56,7 +56,7 @@
 }
 ```
 
-### `offer` / `answer` (client ↔ server ↔ target)
+### `offer` / `answer` (client <-> server <-> target)
 ```
 {
   "type": "offer",
@@ -81,7 +81,7 @@
 }
 ```
 
-### `ice` (client ↔ server ↔ target)
+### `ice` (client <-> server <-> target)
 ```
 {
   "type": "ice",
@@ -94,7 +94,7 @@
 }
 ```
 
-### `ping` / `pong` (client ↔ server)
+### `ping` / `pong` (client <-> server)
 ```
 {
   "type": "ping",
@@ -111,8 +111,8 @@
 }
 ```
 
-## Контракт `state` для DataChannel
-Отправляется напрямую peer‑to‑peer, частота **10–20 Hz**.
+## `state` contract for DataChannel
+Sent directly peer-to-peer at **10-20 Hz**.
 
 ```
 {
@@ -125,4 +125,3 @@
   }
 }
 ```
-
