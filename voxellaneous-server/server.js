@@ -7,6 +7,7 @@ const PORT = Number.parseInt(process.env.PORT || '8080', 10);
 const DEFAULT_ROOM = process.env.DEFAULT_ROOM || 'lobby';
 const TIMEOUT_MS = Number.parseInt(process.env.TIMEOUT_MS || '15000', 10);
 const CLEANUP_INTERVAL_MS = Number.parseInt(process.env.CLEANUP_INTERVAL_MS || '5000', 10);
+const MAX_PEERS = Number.parseInt(process.env.MAX_PEERS || '8', 10);
 
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
@@ -74,9 +75,20 @@ function removePeer(peer, reason) {
   peer.roomId = null;
 }
 
-function handleHello(peer, message) {
+function handleJoin(peer, message) {
   const roomId = (message.roomId || DEFAULT_ROOM).toString();
   const room = getRoom(roomId);
+
+  if (room.size >= MAX_PEERS) {
+    sendJson(peer.ws, {
+      type: 'join',
+      roomId,
+      payload: {
+        error: 'room_full',
+      },
+    });
+    return;
+  }
 
   if (!peer.peerId) {
     peer.peerId = generatePeerId();
@@ -89,31 +101,20 @@ function handleHello(peer, message) {
   const peers = Array.from(room.keys()).filter((id) => id !== peer.peerId);
 
   sendJson(peer.ws, {
-    type: 'hello',
+    type: 'join',
     roomId,
     payload: {
       peerId: peer.peerId,
       peers,
     },
   });
-}
 
-function handleState(peer, message) {
-  if (!peer.peerId || !peer.roomId) return;
-  const room = rooms.get(peer.roomId);
-  if (!room || !room.has(peer.peerId)) return;
-  peer.lastSeen = Date.now();
-
-  const payload = message.payload || {};
-  const id = payload.id;
-  if (typeof id !== 'string' || id !== peer.peerId) {
-    return;
-  }
-
-  broadcast(peer.roomId, {
-    type: 'state',
-    roomId: peer.roomId,
-    payload,
+  broadcast(roomId, {
+    type: 'join',
+    roomId,
+    payload: {
+      peerId: peer.peerId,
+    },
   }, peer.peerId);
 }
 
@@ -136,6 +137,30 @@ function handlePing(peer, message) {
   });
 }
 
+function forwardToPeer(peer, message, type) {
+  if (!peer.peerId || !peer.roomId) return;
+  const payload = message && message.payload;
+  if (!payload || typeof payload !== 'object') return;
+  const data = payload;
+  if (typeof data.to !== 'string') return;
+
+  const room = rooms.get(peer.roomId);
+  if (!room) return;
+  const target = room.get(data.to);
+  if (!target) return;
+
+  sendJson(target.ws, {
+    type,
+    roomId: peer.roomId,
+    payload: {
+      from: peer.peerId,
+      to: data.to,
+      sdp: data.sdp,
+      candidate: data.candidate,
+    },
+  });
+}
+
 function handleMessage(peer, data) {
   const message = safeJsonParse(data);
   if (!message || typeof message.type !== 'string') {
@@ -143,14 +168,20 @@ function handleMessage(peer, data) {
   }
 
   switch (message.type) {
-    case 'hello':
-      handleHello(peer, message);
-      break;
-    case 'state':
-      handleState(peer, message);
+    case 'join':
+      handleJoin(peer, message);
       break;
     case 'leave':
       handleLeave(peer, message);
+      break;
+    case 'offer':
+      forwardToPeer(peer, message, 'offer');
+      break;
+    case 'answer':
+      forwardToPeer(peer, message, 'answer');
+      break;
+    case 'ice':
+      forwardToPeer(peer, message, 'ice');
       break;
     case 'ping':
       handlePing(peer, message);

@@ -20,6 +20,20 @@ type LocalState = {
   direction: Vector3;
 };
 
+type JoinPayload = {
+  peerId?: unknown;
+  peers?: unknown;
+  error?: unknown;
+};
+
+type SignalingMessage = {
+  type?: unknown;
+  roomId?: unknown;
+  payload?: unknown;
+};
+
+const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+
 function isVector3(value: unknown): value is Vector3 {
   if (!value || typeof value !== 'object') return false;
   const v = value as { x?: unknown; y?: unknown; z?: unknown };
@@ -30,6 +44,8 @@ export class NetworkClient {
   private ws: WebSocket | null = null;
   private peerId: string | null = null;
   private readonly remotePlayers = new Map<string, RemotePlayerState>();
+  private readonly peerConnections = new Map<string, RTCPeerConnection>();
+  private readonly dataChannels = new Map<string, RTCDataChannel>();
   private readonly url: string;
   private readonly roomId: string;
   private readonly stateHz: number;
@@ -59,7 +75,9 @@ export class NetworkClient {
     this.manualClose = true;
     this.clearIntervals();
     this.clearReconnect();
+    this.sendLeave('client_close');
     this.remotePlayers.clear();
+    this.closePeerConnections();
     this.peerId = null;
     this.closeSocket();
   }
@@ -87,7 +105,7 @@ export class NetworkClient {
     ws.addEventListener('open', () => {
       // eslint-disable-next-line no-console
       console.log('[network] connected');
-      this.sendHello();
+      this.sendJoin();
     });
 
     ws.addEventListener('close', () => {
@@ -95,6 +113,7 @@ export class NetworkClient {
       console.log('[network] disconnected');
       this.peerId = null;
       this.remotePlayers.clear();
+      this.closePeerConnections();
       if (!this.manualClose) this.scheduleReconnect();
     });
 
@@ -116,6 +135,25 @@ export class NetworkClient {
       // ignore
     }
     this.ws = null;
+  }
+
+  private closePeerConnections(): void {
+    for (const [peerId, channel] of this.dataChannels.entries()) {
+      try {
+        channel.close();
+      } catch {
+        // ignore
+      }
+      this.dataChannels.delete(peerId);
+    }
+    for (const [peerId, pc] of this.peerConnections.entries()) {
+      try {
+        pc.close();
+      } catch {
+        // ignore
+      }
+      this.peerConnections.delete(peerId);
+    }
   }
 
   private scheduleReconnect(): void {
@@ -158,11 +196,11 @@ export class NetworkClient {
     this.ws.send(JSON.stringify(message));
   }
 
-  private sendHello(): void {
+  private sendJoin(): void {
     this.sendJson({
-      type: 'hello',
+      type: 'join',
       roomId: this.roomId,
-      payload: { clientVersion: 'web-0.1' },
+      payload: { clientId: 'web-0.1' },
     });
   }
 
@@ -176,9 +214,8 @@ export class NetworkClient {
 
   private sendState(): void {
     if (!this.peerId || !this.localState) return;
-    this.sendJson({
+    const message = JSON.stringify({
       type: 'state',
-      roomId: this.roomId,
       payload: {
         id: this.peerId,
         position: this.localState.position,
@@ -186,11 +223,16 @@ export class NetworkClient {
         timestamp: Date.now(),
       },
     });
+    for (const channel of this.dataChannels.values()) {
+      if (channel.readyState === 'open') {
+        channel.send(message);
+      }
+    }
   }
 
   private handleMessage(data: unknown): void {
     if (typeof data !== 'string') return;
-    let message: { type?: unknown; payload?: unknown };
+    let message: SignalingMessage;
     try {
       message = JSON.parse(data);
     } catch {
@@ -199,14 +241,20 @@ export class NetworkClient {
     if (!message || typeof message.type !== 'string') return;
 
     switch (message.type) {
-      case 'hello':
-        this.handleHello(message.payload);
-        break;
-      case 'state':
-        this.handleState(message.payload);
+      case 'join':
+        this.handleJoin(message.payload as JoinPayload);
         break;
       case 'leave':
         this.handleLeave(message.payload);
+        break;
+      case 'offer':
+        this.handleOffer(message.payload);
+        break;
+      case 'answer':
+        this.handleAnswer(message.payload);
+        break;
+      case 'ice':
+        this.handleIce(message.payload);
         break;
       case 'pong':
         break;
@@ -215,36 +263,84 @@ export class NetworkClient {
     }
   }
 
-  private handleHello(payload: unknown): void {
+  private handleJoin(payload: JoinPayload): void {
     if (!payload || typeof payload !== 'object') return;
-    const data = payload as { peerId?: unknown; peers?: unknown };
-    if (typeof data.peerId === 'string') {
-      this.peerId = data.peerId;
-    }
-    if (Array.isArray(data.peers)) {
+    if (payload.error === 'room_full') {
       // eslint-disable-next-line no-console
-      console.log(`[network] peers in room: ${data.peers.length}`);
+      console.log('[network] room is full');
+      return;
+    }
+    if (Array.isArray(payload.peers)) {
+      if (typeof payload.peerId === 'string') {
+        this.peerId = payload.peerId;
+      }
+      const peers = payload.peers.filter((id) => typeof id === 'string') as string[];
+      // eslint-disable-next-line no-console
+      console.log(`[network] peers in room: ${peers.length}`);
+      for (const peerId of peers) {
+        this.maybeConnectToPeer(peerId);
+      }
+      return;
+    }
+
+    if (typeof payload.peerId === 'string') {
+      const peerId = payload.peerId;
+      if (peerId !== this.peerId) {
+        this.maybeConnectToPeer(peerId);
+      }
     }
   }
 
-  private handleState(payload: unknown): void {
+  private handleOffer(payload: unknown): void {
     if (!payload || typeof payload !== 'object') return;
-    const data = payload as {
-      id?: unknown;
-      position?: unknown;
-      direction?: unknown;
-      timestamp?: unknown;
-    };
-    if (typeof data.id !== 'string') return;
-    if (data.id === this.peerId) return;
-    if (!isVector3(data.position) || !isVector3(data.direction)) return;
-    if (typeof data.timestamp !== 'number') return;
+    const data = payload as { from?: unknown; sdp?: unknown };
+    if (typeof data.from !== 'string' || typeof data.sdp !== 'string') return;
+    const peerId = data.from;
+    const pc = this.ensurePeerConnection(peerId, false);
+    pc.setRemoteDescription({ type: 'offer', sdp: data.sdp })
+      .then(() => pc.createAnswer())
+      .then((answer) => pc.setLocalDescription(answer))
+      .then(() => {
+        if (!pc.localDescription) return;
+        this.sendJson({
+          type: 'answer',
+          roomId: this.roomId,
+          payload: {
+            to: peerId,
+            sdp: pc.localDescription.sdp,
+          },
+        });
+      })
+      .catch(() => {
+        // ignore
+      });
+  }
 
-    this.remotePlayers.set(data.id, {
-      id: data.id,
-      position: data.position,
-      direction: data.direction,
-      timestamp: data.timestamp,
+  private handleAnswer(payload: unknown): void {
+    if (!payload || typeof payload !== 'object') return;
+    const data = payload as { from?: unknown; sdp?: unknown };
+    if (typeof data.from !== 'string' || typeof data.sdp !== 'string') return;
+    const pc = this.peerConnections.get(data.from);
+    if (!pc) return;
+    pc.setRemoteDescription({ type: 'answer', sdp: data.sdp }).catch(() => {
+      // ignore
+    });
+  }
+
+  private handleIce(payload: unknown): void {
+    if (!payload || typeof payload !== 'object') return;
+    const data = payload as { from?: unknown; candidate?: unknown };
+    if (typeof data.from !== 'string' || typeof data.candidate !== 'string') return;
+    const pc = this.peerConnections.get(data.from);
+    if (!pc) return;
+    let candidate: RTCIceCandidateInit;
+    try {
+      candidate = JSON.parse(data.candidate) as RTCIceCandidateInit;
+    } catch {
+      return;
+    }
+    pc.addIceCandidate(candidate).catch(() => {
+      // ignore
     });
   }
 
@@ -252,6 +348,152 @@ export class NetworkClient {
     if (!payload || typeof payload !== 'object') return;
     const data = payload as { id?: unknown };
     if (typeof data.id !== 'string') return;
-    this.remotePlayers.delete(data.id);
+    this.cleanupPeer(data.id);
+  }
+
+  private sendLeave(reason: string): void {
+    if (!this.peerId) return;
+    this.sendJson({
+      type: 'leave',
+      roomId: this.roomId,
+      payload: {
+        clientId: this.peerId,
+        reason,
+      },
+    });
+  }
+
+  private maybeConnectToPeer(peerId: string): void {
+    if (!this.peerId || peerId === this.peerId) return;
+    const initiator = this.peerId.localeCompare(peerId) < 0;
+    const pc = this.ensurePeerConnection(peerId, initiator);
+    if (initiator) {
+      pc.createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .then(() => {
+          if (!pc.localDescription) return;
+          this.sendJson({
+            type: 'offer',
+            roomId: this.roomId,
+            payload: {
+              to: peerId,
+              sdp: pc.localDescription.sdp,
+            },
+          });
+        })
+        .catch(() => {
+          // ignore
+        });
+    }
+  }
+
+  private ensurePeerConnection(peerId: string, initiator: boolean): RTCPeerConnection {
+    const existing = this.peerConnections.get(peerId);
+    if (existing) return existing;
+    const pc = new RTCPeerConnection({ iceServers });
+    this.peerConnections.set(peerId, pc);
+
+    pc.onicecandidate = (event) => {
+      if (!event.candidate) return;
+      this.sendJson({
+        type: 'ice',
+        roomId: this.roomId,
+        payload: {
+          to: peerId,
+          candidate: JSON.stringify(event.candidate),
+        },
+      });
+    };
+
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      if (state === 'connected') {
+        // eslint-disable-next-line no-console
+        console.log(`[network] rtc connected: ${peerId}`);
+      }
+      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+        this.cleanupPeer(peerId);
+        if (!this.manualClose && this.peerId) {
+          this.maybeConnectToPeer(peerId);
+        }
+      }
+    };
+
+    pc.ondatachannel = (event) => {
+      this.setupDataChannel(peerId, event.channel);
+    };
+
+    if (initiator) {
+      const channel = pc.createDataChannel('state');
+      this.setupDataChannel(peerId, channel);
+    }
+
+    return pc;
+  }
+
+  private setupDataChannel(peerId: string, channel: RTCDataChannel): void {
+    this.dataChannels.set(peerId, channel);
+
+    channel.onopen = () => {
+      // eslint-disable-next-line no-console
+      console.log(`[network] datachannel open: ${peerId}`);
+    };
+    channel.onclose = () => {
+      // eslint-disable-next-line no-console
+      console.log(`[network] datachannel closed: ${peerId}`);
+    };
+    channel.onmessage = (event) => {
+      this.handleDataMessage(event.data);
+    };
+  }
+
+  private handleDataMessage(data: unknown): void {
+    if (typeof data !== 'string') return;
+    let message: { type?: unknown; payload?: unknown };
+    try {
+      message = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (!message || message.type !== 'state') return;
+    const payload = message.payload as {
+      id?: unknown;
+      position?: unknown;
+      direction?: unknown;
+      timestamp?: unknown;
+    };
+    if (typeof payload.id !== 'string') return;
+    if (payload.id === this.peerId) return;
+    if (!isVector3(payload.position) || !isVector3(payload.direction)) return;
+    if (typeof payload.timestamp !== 'number') return;
+
+    this.remotePlayers.set(payload.id, {
+      id: payload.id,
+      position: payload.position,
+      direction: payload.direction,
+      timestamp: payload.timestamp,
+    });
+  }
+
+  private cleanupPeer(peerId: string): void {
+    const channel = this.dataChannels.get(peerId);
+    if (channel) {
+      try {
+        channel.close();
+      } catch {
+        // ignore
+      }
+      this.dataChannels.delete(peerId);
+    }
+    const pc = this.peerConnections.get(peerId);
+    if (pc) {
+      try {
+        pc.close();
+      } catch {
+        // ignore
+      }
+      this.peerConnections.delete(peerId);
+    }
+    this.remotePlayers.delete(peerId);
   }
 }
