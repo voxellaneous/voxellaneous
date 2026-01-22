@@ -1,12 +1,12 @@
 # voxellaneous-server
 
-Minimal WebSocket server for signaling (no state relay).
+Minimal WebSocket signaling server (TypeScript, no state relay).
 
 ## Run
 
 ```bash
 npm install
-npm run start
+npm run dev
 ```
 
 ## Environment variables
@@ -19,4 +19,5 @@ npm run start
 
 ## Notes
 
+- This server lives in the monorepo as a subfolder.
 - The server only provides signaling (join/leave/offer/answer/ice).

@@ -28,7 +28,7 @@ npm run dev
 ```
 cd voxellaneous-server
 npm install
-npm run start
+npm run dev
 ```
 
 2) Start the frontend:
@@ -41,6 +41,7 @@ npm run dev
 
 By default the frontend connects to `ws://<host>:8080` and room `lobby`.
 Position data flows directly through the WebRTC DataChannel; the server is only for signaling.
+The signaling server is TypeScript and lives in this monorepo as a subfolder.
 
 ### Production
 

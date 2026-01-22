@@ -3,12 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "commonjs",
-  "main": "server.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node dist/server.js",
+    "dev": "tsx server.ts",
+    "build": "tsc"
   },
   "dependencies": {
     "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
   }
 }

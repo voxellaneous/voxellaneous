@@ -1,7 +1,24 @@
-'use strict';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 
-const http = require('http');
-const { WebSocketServer } = require('ws');
+type Peer = {
+  ws: WebSocket;
+  peerId: string | null;
+  roomId: string | null;
+  lastSeen: number;
+};
+
+type SignalingMessage = {
+  type?: unknown;
+  roomId?: unknown;
+  payload?: unknown;
+};
+
+type TargetPayload = {
+  to?: unknown;
+  sdp?: unknown;
+  candidate?: unknown;
+};
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
 const DEFAULT_ROOM = process.env.DEFAULT_ROOM || 'lobby';
@@ -12,36 +29,36 @@ const MAX_PEERS = Number.parseInt(process.env.MAX_PEERS || '8', 10);
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
 
-const rooms = new Map(); // roomId -> Map(peerId -> peer)
+const rooms = new Map<string, Map<string, Peer>>();
 let peerCounter = 0;
 
-function getRoom(roomId) {
+function getRoom(roomId: string): Map<string, Peer> {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, new Map());
   }
-  return rooms.get(roomId);
+  return rooms.get(roomId)!;
 }
 
-function generatePeerId() {
+function generatePeerId(): string {
   peerCounter += 1;
   return `peer-${peerCounter}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function safeJsonParse(data) {
+function safeJsonParse(data: string): SignalingMessage | null {
   try {
-    return JSON.parse(data);
-  } catch (error) {
+    return JSON.parse(data) as SignalingMessage;
+  } catch {
     return null;
   }
 }
 
-function sendJson(ws, message) {
+function sendJson(ws: WebSocket, message: unknown): void {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(message));
   }
 }
 
-function broadcast(roomId, message, excludePeerId) {
+function broadcast(roomId: string, message: unknown, excludePeerId?: string): void {
   const room = rooms.get(roomId);
   if (!room) return;
   for (const [peerId, peer] of room.entries()) {
@@ -50,21 +67,25 @@ function broadcast(roomId, message, excludePeerId) {
   }
 }
 
-function removePeer(peer, reason) {
-  if (!peer || !peer.roomId || !peer.peerId) return;
+function removePeer(peer: Peer, reason: string): void {
+  if (!peer.roomId || !peer.peerId) return;
   const room = rooms.get(peer.roomId);
   if (!room) return;
 
   if (room.has(peer.peerId)) {
     room.delete(peer.peerId);
-    broadcast(peer.roomId, {
-      type: 'leave',
-      roomId: peer.roomId,
-      payload: {
-        id: peer.peerId,
-        reason,
+    broadcast(
+      peer.roomId,
+      {
+        type: 'leave',
+        roomId: peer.roomId,
+        payload: {
+          id: peer.peerId,
+          reason,
+        },
       },
-    }, peer.peerId);
+      peer.peerId,
+    );
   }
 
   if (room.size === 0) {
@@ -75,7 +96,7 @@ function removePeer(peer, reason) {
   peer.roomId = null;
 }
 
-function handleJoin(peer, message) {
+function handleJoin(peer: Peer, message: SignalingMessage): void {
   const roomId = (message.roomId || DEFAULT_ROOM).toString();
   const room = getRoom(roomId);
 
@@ -109,23 +130,28 @@ function handleJoin(peer, message) {
     },
   });
 
-  broadcast(roomId, {
-    type: 'join',
+  broadcast(
     roomId,
-    payload: {
-      peerId: peer.peerId,
+    {
+      type: 'join',
+      roomId,
+      payload: {
+        peerId: peer.peerId,
+      },
     },
-  }, peer.peerId);
+    peer.peerId,
+  );
 }
 
-function handleLeave(peer, message) {
+function handleLeave(peer: Peer, message: SignalingMessage): void {
   if (!peer.peerId || !peer.roomId) return;
   peer.lastSeen = Date.now();
-  const reason = message && message.payload && message.payload.reason;
-  removePeer(peer, reason || 'client_close');
+  const payload = message.payload as { reason?: unknown } | undefined;
+  const reason = payload && typeof payload.reason === 'string' ? payload.reason : 'client_close';
+  removePeer(peer, reason);
 }
 
-function handlePing(peer, message) {
+function handlePing(peer: Peer): void {
   if (!peer.peerId || !peer.roomId) return;
   peer.lastSeen = Date.now();
   sendJson(peer.ws, {
@@ -137,16 +163,14 @@ function handlePing(peer, message) {
   });
 }
 
-function forwardToPeer(peer, message, type) {
+function forwardToPeer(peer: Peer, message: SignalingMessage, type: string): void {
   if (!peer.peerId || !peer.roomId) return;
-  const payload = message && message.payload;
-  if (!payload || typeof payload !== 'object') return;
-  const data = payload;
-  if (typeof data.to !== 'string') return;
+  const payload = message.payload as TargetPayload | undefined;
+  if (!payload || typeof payload.to !== 'string') return;
 
   const room = rooms.get(peer.roomId);
   if (!room) return;
-  const target = room.get(data.to);
+  const target = room.get(payload.to);
   if (!target) return;
 
   sendJson(target.ws, {
@@ -154,15 +178,16 @@ function forwardToPeer(peer, message, type) {
     roomId: peer.roomId,
     payload: {
       from: peer.peerId,
-      to: data.to,
-      sdp: data.sdp,
-      candidate: data.candidate,
+      to: payload.to,
+      sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
+      candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
     },
   });
 }
 
-function handleMessage(peer, data) {
-  const message = safeJsonParse(data);
+function handleMessage(peer: Peer, data: WebSocket.RawData): void {
+  const text = typeof data === 'string' ? data : data.toString('utf8');
+  const message = safeJsonParse(text);
   if (!message || typeof message.type !== 'string') {
     return;
   }
@@ -184,7 +209,7 @@ function handleMessage(peer, data) {
       forwardToPeer(peer, message, 'ice');
       break;
     case 'ping':
-      handlePing(peer, message);
+      handlePing(peer);
       break;
     default:
       break;
@@ -192,7 +217,7 @@ function handleMessage(peer, data) {
 }
 
 wss.on('connection', (ws) => {
-  const peer = {
+  const peer: Peer = {
     ws,
     peerId: null,
     roomId: null,
@@ -219,7 +244,7 @@ setInterval(() => {
       if (now - peer.lastSeen > TIMEOUT_MS) {
         try {
           peer.ws.terminate();
-        } catch (error) {
+        } catch {
           // ignore
         }
         removePeer(peer, 'timeout');
