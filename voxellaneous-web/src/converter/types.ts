@@ -67,21 +67,3 @@ export interface VoxelData {
   /** Map from voxel index to color */
   voxelColors: Map<number, RGBA>;
 }
-
-/** Export format for JSON serialization */
-export interface VoxelExportFormat {
-  version: string;
-  object: {
-    id: string;
-    dims: [number, number, number];
-    voxels: string; // base64-encoded Uint8Array
-  };
-  palette: RGBA[];
-  metadata: {
-    sourceFile: string;
-    resolution: number;
-    mode: 'surface' | 'solid';
-    triangles: number;
-    voxels: number;
-  };
-}

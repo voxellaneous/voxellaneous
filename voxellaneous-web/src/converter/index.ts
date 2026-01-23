@@ -1,19 +1,16 @@
 import { mat4 } from 'gl-matrix';
-import { loadGLTF, loadGLTFFromFolder } from './gltf-loader';
+import { loadGLTFFromFolder } from './gltf-loader';
 import { voxelizeMeshes } from './voxelizer';
 import { mapColorsToPalette } from './palette-mapper';
-import { ConversionResult, VoxelizationConfig, VoxelExportFormat } from './types';
+import { ConversionResult, VoxelizationConfig } from './types';
 import { VoxelObject, Scene } from '../scene';
 
-export type { VoxelizationConfig, ConversionResult, VoxelExportFormat } from './types';
+export type { VoxelizationConfig, ConversionResult } from './types';
 
 /**
  * Converts a GLTF/GLB folder to voxel data (supports external .bin and textures)
  */
-export async function convertGLTFFromFolder(
-  files: FileList,
-  config: VoxelizationConfig
-): Promise<ConversionResult> {
+export async function convertGLTFFromFolder(files: FileList, config: VoxelizationConfig): Promise<ConversionResult> {
   const startTime = performance.now();
 
   // Load and parse GLTF from folder
@@ -61,112 +58,6 @@ export async function convertGLTFFromFolder(
 }
 
 /**
- * Converts a GLTF/GLB file to voxel data
- */
-export async function convertGLTFToVoxels(file: File, config: VoxelizationConfig): Promise<ConversionResult> {
-  const startTime = performance.now();
-
-  // Load and parse GLTF file
-  const { meshes, boundingBox } = await loadGLTF(file);
-
-  // Count triangles
-  const triangles = meshes.reduce((sum, m) => sum + m.indices.length / 3, 0);
-
-  // Voxelize meshes
-  const voxelData = voxelizeMeshes(meshes, boundingBox, config);
-
-  // Map colors to palette
-  const { voxels, palette, quantized, uniqueColors } = mapColorsToPalette(voxelData);
-
-  const endTime = performance.now();
-
-  // Create VoxelObject with proper scale to be visible
-  const dims: [number, number, number] = [config.resolution, config.resolution, config.resolution];
-  const modelMatrix = mat4.create();
-  // Scale to match resolution so each voxel is 1 unit
-  mat4.scale(modelMatrix, modelMatrix, [config.resolution, config.resolution, config.resolution]);
-  // Center the object
-  mat4.translate(modelMatrix, modelMatrix, [-0.5, -0.5, -0.5]);
-  const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
-
-  const object: VoxelObject = {
-    id: file.name.replace(/\.[^.]+$/, ''),
-    dims,
-    model_matrix: modelMatrix,
-    inv_model_matrix: invModelMatrix,
-    voxels,
-  };
-
-  return {
-    object,
-    palette,
-    stats: {
-      triangles,
-      voxels: voxelData.voxelColors.size,
-      timeMs: endTime - startTime,
-      uniqueColors,
-      quantized,
-    },
-  };
-}
-
-/**
- * Exports conversion result to JSON format
- */
-export function exportToJSON(result: ConversionResult, sourceFile: string, config: VoxelizationConfig): string {
-  const exportData: VoxelExportFormat = {
-    version: '1.0',
-    object: {
-      id: result.object.id,
-      dims: [result.object.dims[0], result.object.dims[1], result.object.dims[2]],
-      voxels: uint8ArrayToBase64(result.object.voxels),
-    },
-    palette: result.palette,
-    metadata: {
-      sourceFile,
-      resolution: config.resolution,
-      mode: config.mode,
-      triangles: result.stats.triangles,
-      voxels: result.stats.voxels,
-    },
-  };
-
-  return JSON.stringify(exportData, null, 2);
-}
-
-/**
- * Imports voxel data from JSON format
- */
-export function importFromJSON(json: string): ConversionResult {
-  const data: VoxelExportFormat = JSON.parse(json);
-
-  const dims: [number, number, number] = [data.object.dims[0], data.object.dims[1], data.object.dims[2]];
-  const modelMatrix = mat4.create();
-  const invModelMatrix = mat4.create();
-  mat4.invert(invModelMatrix, modelMatrix);
-
-  const object: VoxelObject = {
-    id: data.object.id,
-    dims,
-    model_matrix: modelMatrix,
-    inv_model_matrix: invModelMatrix,
-    voxels: base64ToUint8Array(data.object.voxels),
-  };
-
-  return {
-    object,
-    palette: data.palette,
-    stats: {
-      triangles: data.metadata.triangles,
-      voxels: data.metadata.voxels,
-      timeMs: 0,
-      uniqueColors: data.palette.length,
-      quantized: false,
-    },
-  };
-}
-
-/**
  * Creates a scene from a conversion result
  */
 export function createSceneFromResult(result: ConversionResult): Scene {
@@ -176,72 +67,8 @@ export function createSceneFromResult(result: ConversionResult): Scene {
   };
 }
 
-/**
- * Merges a conversion result into an existing scene
- */
-export function mergeResultIntoScene(
-  scene: Scene,
-  result: ConversionResult,
-  position: [number, number, number] = [0, 0, 0],
-  scale: number = 1,
-): void {
-  // Remap voxel palette indices
-  const paletteOffset = scene.palette.length;
-
-  // Add new palette colors (skip index 0 which is transparent)
-  for (let i = 1; i < result.palette.length; i++) {
-    scene.palette.push(result.palette[i]);
-  }
-
-  // Create remapped voxels
-  const remappedVoxels = new Uint8Array(result.object.voxels.length);
-  for (let i = 0; i < result.object.voxels.length; i++) {
-    const idx = result.object.voxels[i];
-    remappedVoxels[i] = idx === 0 ? 0 : idx + paletteOffset - 1;
-  }
-
-  // Create positioned object
-  const modelMatrix = mat4.create();
-  mat4.translate(modelMatrix, modelMatrix, position);
-  mat4.scale(modelMatrix, modelMatrix, [scale, scale, scale]);
-  const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
-
-  const object: VoxelObject = {
-    id: result.object.id + '_' + Date.now(),
-    dims: result.object.dims,
-    model_matrix: modelMatrix,
-    inv_model_matrix: invModelMatrix,
-    voxels: remappedVoxels,
-  };
-
-  scene.objects.push(object);
-}
-
-/**
- * Converts Uint8Array to base64 string
- */
-function uint8ArrayToBase64(arr: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < arr.length; i++) {
-    binary += String.fromCharCode(arr[i]);
-  }
-  return btoa(binary);
-}
-
-/**
- * Converts base64 string to Uint8Array
- */
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const arr = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    arr[i] = binary.charCodeAt(i);
-  }
-  return arr;
-}
-
 // Binary format magic bytes
-const BINARY_MAGIC = new Uint8Array([0x56, 0x58, 0x4C, 0x31]); // "VXL1"
+const BINARY_MAGIC = new Uint8Array([0x56, 0x58, 0x4c, 0x31]); // "VXL1"
 const BINARY_VERSION = 1;
 
 /**
@@ -318,7 +145,10 @@ export async function importFromBinary(file: File): Promise<ConversionResult> {
 /**
  * Imports voxel data from ArrayBuffer (for fetch use)
  */
-export async function importFromArrayBuffer(compressed: Uint8Array, filename: string = 'scene.voxgz'): Promise<ConversionResult> {
+export async function importFromArrayBuffer(
+  compressed: Uint8Array,
+  filename: string = 'scene.voxgz',
+): Promise<ConversionResult> {
   const bytes = await gzipDecompress(compressed);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -354,12 +184,7 @@ export async function importFromArrayBuffer(compressed: Uint8Array, filename: st
   // Palette data
   const palette: import('../scene').RGBA[] = [];
   for (let i = 0; i < paletteLength; i++) {
-    palette.push([
-      bytes[offset++],
-      bytes[offset++],
-      bytes[offset++],
-      bytes[offset++],
-    ]);
+    palette.push([bytes[offset++], bytes[offset++], bytes[offset++], bytes[offset++]]);
   }
 
   // Voxel data

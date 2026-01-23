@@ -1,13 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { LoadedMesh, BoundingBox, MeshMaterial } from './types';
-import { RGBA } from '../scene';
 
 /**
  * Loads a GLTF/GLB file from a folder selection and extracts mesh data
  */
 export async function loadGLTFFromFolder(
-  files: FileList
+  files: FileList,
 ): Promise<{ meshes: LoadedMesh[]; boundingBox: BoundingBox; fileName: string }> {
   // Build a map of file paths to Files
   const fileMap = new Map<string, File>();
@@ -124,7 +123,7 @@ export async function loadGLTFFromFolder(
         // Clean up blob URLs on error
         blobUrls.forEach((url) => URL.revokeObjectURL(url));
         reject(new Error(`Failed to parse GLTF: ${error.message}`));
-      }
+      },
     );
   });
 }
@@ -166,7 +165,7 @@ export async function loadGLTF(file: File): Promise<{ meshes: LoadedMesh[]; boun
       },
       (error) => {
         reject(new Error(`Failed to parse GLTF: ${error.message}`));
-      }
+      },
     );
   });
 }
@@ -213,15 +212,11 @@ function extractMeshData(mesh: THREE.Mesh): LoadedMesh | null {
   }
 
   // Get optional attributes
-  const normals = geometry.attributes.normal
-    ? new Float32Array(geometry.attributes.normal.array)
-    : undefined;
+  const normals = geometry.attributes.normal ? new Float32Array(geometry.attributes.normal.array) : undefined;
 
   const uvs = geometry.attributes.uv ? new Float32Array(geometry.attributes.uv.array) : undefined;
 
-  const colors = geometry.attributes.color
-    ? new Float32Array(geometry.attributes.color.array)
-    : undefined;
+  const colors = geometry.attributes.color ? new Float32Array(geometry.attributes.color.array) : undefined;
 
   // Extract material data
   const material = extractMaterialData(mesh.material);
@@ -251,11 +246,7 @@ function extractMaterialData(material: THREE.Material | THREE.Material[]): MeshM
   // Handle various material types that have color property
   if ('color' in mat && mat.color instanceof THREE.Color) {
     const color = mat.color;
-    baseColor = [
-      clampColor(color.r * 255),
-      clampColor(color.g * 255),
-      clampColor(color.b * 255),
-    ];
+    baseColor = [clampColor(color.r * 255), clampColor(color.g * 255), clampColor(color.b * 255)];
   }
 
   // Check for metalness (PBR property)
@@ -285,25 +276,13 @@ function extractMaterialData(material: THREE.Material | THREE.Material[]): MeshM
 
       if (warmth > 0.05) {
         // Gold-ish tint
-        baseColor = [
-          clampColor(brightness * 1.1),
-          clampColor(brightness * 0.85),
-          clampColor(brightness * 0.5),
-        ];
+        baseColor = [clampColor(brightness * 1.1), clampColor(brightness * 0.85), clampColor(brightness * 0.5)];
       } else if (warmth < -0.05) {
         // Blue-ish/cool metal
-        baseColor = [
-          clampColor(brightness * 0.8),
-          clampColor(brightness * 0.85),
-          clampColor(brightness * 1.0),
-        ];
+        baseColor = [clampColor(brightness * 0.8), clampColor(brightness * 0.85), clampColor(brightness * 1.0)];
       } else {
         // Silver/chrome - keep neutral but add slight contrast
-        baseColor = [
-          clampColor(brightness * 0.95),
-          clampColor(brightness * 0.95),
-          clampColor(brightness * 1.0),
-        ];
+        baseColor = [clampColor(brightness * 0.95), clampColor(brightness * 0.95), clampColor(brightness * 1.0)];
       }
     }
   }
@@ -313,11 +292,7 @@ function extractMaterialData(material: THREE.Material | THREE.Material[]): MeshM
     if ('emissive' in mat && mat.emissive instanceof THREE.Color) {
       const emissive = mat.emissive;
       if (emissive.r > 0.1 || emissive.g > 0.1 || emissive.b > 0.1) {
-        baseColor = [
-          clampColor(emissive.r * 255),
-          clampColor(emissive.g * 255),
-          clampColor(emissive.b * 255),
-        ];
+        baseColor = [clampColor(emissive.r * 255), clampColor(emissive.g * 255), clampColor(emissive.b * 255)];
       }
     }
   }
