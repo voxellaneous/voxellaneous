@@ -1,4 +1,4 @@
-import { mat4 } from 'gl-matrix';
+import { mat4, vec3 } from 'gl-matrix';
 import { loadGLTFFromFolder } from './gltf-loader';
 import { voxelizeMeshes } from './voxelizer';
 import { mapColorsToPalette } from './palette-mapper';
@@ -28,7 +28,7 @@ export async function convertGLTFFromFolder(files: FileList, config: Voxelizatio
   const endTime = performance.now();
 
   // Create VoxelObject with proper scale to be visible
-  const dims: [number, number, number] = [config.resolution, config.resolution, config.resolution];
+  const dims: vec3 = [config.resolution, config.resolution, config.resolution];
   const modelMatrix = mat4.create();
   // Scale to match resolution so each voxel is 1 unit
   mat4.scale(modelMatrix, modelMatrix, [config.resolution, config.resolution, config.resolution]);
