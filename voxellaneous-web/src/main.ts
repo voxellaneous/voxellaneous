@@ -3,7 +3,7 @@ import './style.css';
 
 import init, { Renderer } from 'voxellaneous-core';
 import { initializeDevTools } from './editor';
-import { createCornellBoxScene } from '../tests/cornell-box';
+import { importFromBinary, createSceneFromResult } from './converter';
 import { Scene } from './scene';
 import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
@@ -19,11 +19,7 @@ function createUniformVoxelData(size: number, paletteIndex: number): Uint8Array 
   return voxels;
 }
 
-function createRemoteMarkerObject(
-  id: string,
-  position: { x: number; y: number; z: number },
-  markerVoxels: Uint8Array,
-) {
+function createRemoteMarkerObject(id: string, position: { x: number; y: number; z: number }, markerVoxels: Uint8Array) {
   const modelMatrix = mat4.create();
   mat4.translate(modelMatrix, modelMatrix, [position.x, position.y, position.z]);
   mat4.scale(modelMatrix, modelMatrix, [remoteMarkerSize, remoteMarkerSize, remoteMarkerSize]);
@@ -56,6 +52,7 @@ export type AppData = {
   canvas: HTMLCanvasElement;
   lightDir: { x: number; y: number; z: number };
   ambient: number;
+  lightIntensity: number;
   showBboxes: boolean;
 };
 
@@ -91,8 +88,7 @@ function registerRecurringAnimation(f: FrameRequestCallback): void {
 async function initializeApp(): Promise<AppData> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 
-  const wsUrl =
-    import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:8080`;
+  const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:8080`;
   const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
   const network = new NetworkClient({ url: wsUrl, roomId });
 
@@ -104,16 +100,57 @@ async function initializeApp(): Promise<AppData> {
     presentTarget: 4, // Default to Lit mode
     lightDir: { x: 0.22, y: 0.22, z: 0.56 },
     ambient: 0.3,
+    lightIntensity: 1.0,
     showBboxes: false,
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
 
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
-  cameraModule.setPosition([-50, 0, 100]);
+  cameraModule.setPosition([-100, -470, -356]);
 
   const { autoresizeCanvas } = createCanvasAutoresize(app);
 
+  // Load sponza scene
+  let baseScene: Scene = { palette: [], objects: [] };
+  try {
+    const response = await fetch('/resources/sponza.voxgz');
+    if (response.ok) {
+      const blob = await response.blob();
+      const file = new File([blob], 'sponza.voxgz');
+      const result = await importFromBinary(file);
+      baseScene = createSceneFromResult(result);
+    }
+  } catch (e) {
+    console.warn('Failed to load sponza:', e);
+  }
+  renderer.upload_scene(baseScene);
+
+  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 0);
+
+  let lastRemoteSignature = '';
+  const updateRemoteScene = () => {
+    const remotePlayers = network.getRemotePlayers();
+    const signature = buildRemoteSignature(remotePlayers);
+    if (signature === lastRemoteSignature) return;
+    lastRemoteSignature = signature;
+
+    const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
+      createRemoteMarkerObject(player.id, player.position, markerVoxels),
+    );
+    const scene: Scene = {
+      palette: baseScene.palette,
+      objects: [...baseScene.objects, ...remoteObjects],
+    };
+    renderer.upload_scene(scene);
+  };
+
+  const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
+  window.addEventListener('beforeunload', () => {
+    window.clearInterval(remoteSceneInterval);
+  });
+
+  // NOW start render loop after scene is uploaded
   const render: FrameRequestCallback = (time) => {
     autoresizeCanvas();
     updateProfilerData(profilerData, time);
@@ -132,6 +169,7 @@ async function initializeApp(): Promise<AppData> {
       app.presentTarget,
       lightDirArray,
       app.ambient,
+      app.lightIntensity,
       app.showBboxes,
     );
   };
@@ -143,37 +181,8 @@ async function initializeApp(): Promise<AppData> {
     network.stop();
   });
 
-  const baseScene: Scene = {
-    palette: [],
-    objects: [],
-  };
-  createCornellBoxScene(baseScene);
-  const remotePaletteIndex = baseScene.palette.length;
-  baseScene.palette.push([0, 128, 255, 255]);
-
-  const markerVoxels = createUniformVoxelData(remoteMarkerSize, remotePaletteIndex);
-  let lastRemoteSignature = '';
-  const updateRemoteScene = () => {
-    const remotePlayers = network.getRemotePlayers();
-    const signature = buildRemoteSignature(remotePlayers);
-    if (signature === lastRemoteSignature) return;
-    lastRemoteSignature = signature;
-
-    const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
-      createRemoteMarkerObject(player.id, player.position, markerVoxels),
-    );
-    const scene: Scene = {
-      palette: baseScene.palette,
-      objects: [...baseScene.objects, ...remoteObjects],
-    };
-    renderer.upload_scene(scene);
-  };
-
-  renderer.upload_scene(baseScene);
-  const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
-  window.addEventListener('beforeunload', () => {
-    window.clearInterval(remoteSceneInterval);
-  });
+  // Hide loading indicator
+  document.getElementById('loading')?.classList.add('hidden');
 
   return app;
 }

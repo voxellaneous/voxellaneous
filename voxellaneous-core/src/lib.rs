@@ -47,6 +47,8 @@ struct PerDrawUniforms {
 struct LightingUniforms {
     light_dir: [f32; 3],
     ambient: f32,
+    light_intensity: f32,
+    _padding: [f32; 3],
 }
 
 pub fn create_render_texture_view(
@@ -395,6 +397,8 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&[LightingUniforms {
                     light_dir: [0.5, 0.5, 0.5],
                     ambient: 0.1,
+                    light_intensity: 1.0,
+                    _padding: [0.0; 3],
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -702,6 +706,7 @@ impl Renderer {
         present_target: usize,
         light_dir: &[f32],
         ambient: f32,
+        light_intensity: f32,
         show_bboxes: bool,
     ) -> Result<(), JsValue> {
         let vp_matrix = vp_matrix
@@ -723,6 +728,8 @@ impl Renderer {
         let lighting_uniforms = LightingUniforms {
             light_dir: light_dir.try_into().unwrap_or([0.5, 0.5, 0.5]),
             ambient,
+            light_intensity,
+            _padding: [0.0; 3],
         };
         self.queue.write_buffer(
             &self.lighting_uniform_buffer,
