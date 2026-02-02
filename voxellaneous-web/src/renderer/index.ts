@@ -602,6 +602,9 @@ export class Renderer {
           depthClearValue: 1.0,
           depthLoadOp: 'clear',
           depthStoreOp: 'discard',
+          stencilClearValue: 0,
+          stencilLoadOp: 'clear',
+          stencilStoreOp: 'discard',
         },
       });
 
@@ -740,10 +743,13 @@ export class Renderer {
 
   get_gpu_info(): object {
     return {
-      vendor: this.adapterInfo.vendor,
-      architecture: this.adapterInfo.architecture,
-      device: this.adapterInfo.device,
-      description: this.adapterInfo.description,
+      name: this.adapterInfo.description || this.adapterInfo.device || 'Unknown',
+      vendor: 0,
+      device: 0,
+      device_type: this.adapterInfo.architecture || 'Unknown',
+      driver: this.adapterInfo.vendor || 'Unknown',
+      driver_info: '',
+      backend: 'WebGPU',
     };
   }
 

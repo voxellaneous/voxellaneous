@@ -41,6 +41,12 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     max: 1,
     step: 0.01,
   });
+  lightingFolder.addBinding(app, 'lightIntensity', {
+    label: 'Light Intensity',
+    min: 0,
+    max: 3,
+    step: 0.1,
+  });
 
   const gpuData = app.renderer.get_gpu_info() as GPUData;
 

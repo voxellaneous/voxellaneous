@@ -12,6 +12,7 @@
     "@tweakpane/core": "^2.0.4",
     "@types/node": "^22.5.2",
     "@types/noisejs": "^2.1.0",
+    "@types/three": "^0.170.0",
     "@webgpu/types": "^0.1.69",
     "typescript": "^5.5.3",
     "vite": "^5.4.1"
