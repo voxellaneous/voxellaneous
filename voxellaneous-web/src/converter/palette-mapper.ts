@@ -1,5 +1,6 @@
 import { VoxelData } from './types';
 import { RGBA } from '../scene';
+import { ByteArray } from '../common/types';
 
 const MAX_PALETTE_SIZE = 256;
 
@@ -8,7 +9,7 @@ const MAX_PALETTE_SIZE = 256;
  */
 export interface PaletteMappingResult {
   /** Voxel data with palette indices */
-  voxels: Uint8Array;
+  voxels: ByteArray;
   /** The color palette */
   palette: RGBA[];
   /** Whether quantization was needed */
@@ -21,14 +22,11 @@ export interface PaletteMappingResult {
  * Maps voxel colors to a palette with at most 256 colors
  * Uses median cut quantization if there are more than 256 unique colors
  */
-export function mapColorsToPalette(
-  voxelData: VoxelData,
-  existingPalette?: RGBA[]
-): PaletteMappingResult {
+export function mapColorsToPalette(voxelData: VoxelData, existingPalette?: RGBA[]): PaletteMappingResult {
   const { dims, voxelColors } = voxelData;
   const [nx, ny, nz] = dims;
   const totalVoxels = nx * ny * nz;
-  const voxels = new Uint8Array(totalVoxels);
+  const voxels = new ByteArray(new ArrayBuffer(totalVoxels));
 
   // Collect unique colors
   const colorMap = new Map<string, RGBA>();
@@ -115,10 +113,7 @@ function findNearestColor(color: RGBA, palette: RGBA[]): number {
 
   for (let i = 1; i < palette.length; i++) {
     const p = palette[i];
-    const dist =
-      (color[0] - p[0]) ** 2 +
-      (color[1] - p[1]) ** 2 +
-      (color[2] - p[2]) ** 2;
+    const dist = (color[0] - p[0]) ** 2 + (color[1] - p[1]) ** 2 + (color[2] - p[2]) ** 2;
 
     if (dist < minDist) {
       minDist = dist;
@@ -154,7 +149,8 @@ function medianCutQuantize(colors: RGBA[], maxColors: number): RGBA[] {
 
       // Calculate range for each channel
       for (let axis = 0; axis < 3; axis++) {
-        let min = 255, max = 0;
+        let min = 255,
+          max = 0;
         for (const c of bucket) {
           min = Math.min(min, c[axis]);
           max = Math.max(max, c[axis]);
@@ -183,7 +179,10 @@ function medianCutQuantize(colors: RGBA[], maxColors: number): RGBA[] {
   for (const bucket of buckets) {
     if (bucket.length === 0) continue;
 
-    let r = 0, g = 0, b = 0, a = 0;
+    let r = 0,
+      g = 0,
+      b = 0,
+      a = 0;
     for (const c of bucket) {
       r += c[0];
       g += c[1];

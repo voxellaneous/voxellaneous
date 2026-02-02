@@ -102,7 +102,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             hit_idx = idx;
             hit_voxel = coord;
             hit_t = t;
-            
+
             if last_axis == 0 {
                 hit_normal = vec3<f32>(-f32(step.x), 0.0, 0.0);
             } else if last_axis == 1 {
@@ -110,7 +110,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             } else {
                 hit_normal = vec3<f32>(0.0, 0.0, -f32(step.z));
             }
-            
+
             break;
         }
 

@@ -1,15 +1,16 @@
 import { mat4, vec3 } from 'gl-matrix';
 import { Scene } from '../src/scene';
+import { ByteArray } from '../src/common/types';
 
-function createUniformVoxelData([nx, ny, nz]: [number, number, number], paletteIndex: number): Uint8Array {
+function createUniformVoxelData([nx, ny, nz]: [number, number, number], paletteIndex: number): ByteArray {
   const total = nx * ny * nz;
-  const voxels = new Uint8Array(total);
+  const voxels = new ByteArray(new ArrayBuffer(total));
   voxels.fill(paletteIndex);
   return voxels;
 }
 
-function createSphereVoxelData([nx, ny, nz]: [number, number, number], paletteIndex: number): Uint8Array {
-  const voxels = new Uint8Array(nx * ny * nz);
+function createSphereVoxelData([nx, ny, nz]: [number, number, number], paletteIndex: number): ByteArray {
+  const voxels = new ByteArray(new ArrayBuffer(nx * ny * nz));
   const cx = (nx - 1) / 2;
   const cy = (ny - 1) / 2;
   const cz = (nz - 1) / 2;
@@ -31,17 +32,17 @@ function createSphereVoxelData([nx, ny, nz]: [number, number, number], paletteIn
   return voxels;
 }
 
-function addObjectToScene(scene: Scene, id: string, dims: vec3, translate: vec3, voxels: Uint8Array): void {
+function addObjectToScene(scene: Scene, id: string, dims: vec3, translate: vec3, voxels: ByteArray): void {
   const modelMatrix = mat4.create();
   mat4.translate(modelMatrix, modelMatrix, translate);
   mat4.scale(modelMatrix, modelMatrix, dims);
-  const inverseModelMatrix = mat4.invert(mat4.create(), modelMatrix);
+  const invModelMatrix = mat4.invert(mat4.create(), modelMatrix);
 
   scene.objects.push({
     id,
     dims,
-    model_matrix: modelMatrix,
-    inv_model_matrix: inverseModelMatrix,
+    modelMatrix,
+    invModelMatrix,
     voxels,
   });
 }

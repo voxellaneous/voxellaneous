@@ -1,25 +1,30 @@
 import { CameraModule } from './camera';
 import './style.css';
 
-import init, { Renderer } from 'voxellaneous-core';
+import { Renderer } from './renderer';
 import { initializeDevTools } from './editor';
 import { importFromBinary, createSceneFromResult } from './converter';
-import { Scene } from './scene';
+import { Scene, VoxelObject } from './scene';
 import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
+import { ByteArray } from './common/types';
 
 const remoteMarkerSize = 4;
 
-function createUniformVoxelData(size: number, paletteIndex: number): Uint8Array {
+function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
   const total = size * size * size;
-  const voxels = new Uint8Array(total);
+  const voxels = new ByteArray(new ArrayBuffer(total));
   voxels.fill(paletteIndex);
   return voxels;
 }
 
-function createRemoteMarkerObject(id: string, position: { x: number; y: number; z: number }, markerVoxels: Uint8Array) {
+function createRemoteMarkerObject(
+  id: string,
+  position: { x: number; y: number; z: number },
+  voxels: ByteArray,
+): VoxelObject {
   const modelMatrix = mat4.create();
   mat4.translate(modelMatrix, modelMatrix, [position.x, position.y, position.z]);
   mat4.scale(modelMatrix, modelMatrix, [remoteMarkerSize, remoteMarkerSize, remoteMarkerSize]);
@@ -28,9 +33,9 @@ function createRemoteMarkerObject(id: string, position: { x: number; y: number; 
   return {
     id: `remote_${id}`,
     dims: vec3.fromValues(remoteMarkerSize, remoteMarkerSize, remoteMarkerSize),
-    model_matrix: modelMatrix,
-    inv_model_matrix: inverseModelMatrix,
-    voxels: markerVoxels,
+    modelMatrix,
+    invModelMatrix: inverseModelMatrix,
+    voxels,
   };
 }
 
@@ -92,7 +97,6 @@ async function initializeApp(): Promise<AppData> {
   const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
   const network = new NetworkClient({ url: wsUrl, roomId });
 
-  await init({});
   const renderer = await Renderer.new(canvas);
   const app: AppData = {
     renderer,
@@ -124,7 +128,7 @@ async function initializeApp(): Promise<AppData> {
   } catch (e) {
     console.warn('Failed to load sponza:', e);
   }
-  renderer.upload_scene(baseScene);
+  renderer.uploadScene(baseScene);
 
   const markerVoxels = createUniformVoxelData(remoteMarkerSize, 0);
 
@@ -142,7 +146,7 @@ async function initializeApp(): Promise<AppData> {
       palette: baseScene.palette,
       objects: [...baseScene.objects, ...remoteObjects],
     };
-    renderer.upload_scene(scene);
+    renderer.uploadScene(scene);
   };
 
   const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
