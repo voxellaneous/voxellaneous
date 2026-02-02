@@ -753,7 +753,7 @@ export class Renderer {
     };
   }
 
-  upload_scene(scene: Scene): void {
+  uploadScene(scene: Scene): void {
     // Step 1: Upload the color palette as a uniform buffer
     const colorPalette = new Uint32Array(256);
     for (let i = 0; i < scene.palette.length && i < 256; i++) {
@@ -799,8 +799,8 @@ export class Renderer {
 
       // Write model matrices to uniform buffer
       const uniformData = new Float32Array(32);
-      uniformData.set(obj.model_matrix, 0);
-      uniformData.set(obj.inv_model_matrix, 16);
+      uniformData.set(obj.modelMatrix, 0);
+      uniformData.set(obj.invModelMatrix, 16);
       this.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
       // Create bind group

@@ -4,6 +4,7 @@ import { voxelizeMeshes } from './voxelizer';
 import { mapColorsToPalette } from './palette-mapper';
 import { ConversionResult, VoxelizationConfig } from './types';
 import { VoxelObject, Scene } from '../scene';
+import { ByteArray } from '../common/types';
 
 export type { VoxelizationConfig, ConversionResult } from './types';
 
@@ -39,8 +40,8 @@ export async function convertGLTFFromFolder(files: FileList, config: Voxelizatio
   const object: VoxelObject = {
     id: fileName.replace(/\.[^.]+$/, ''),
     dims,
-    model_matrix: modelMatrix,
-    inv_model_matrix: invModelMatrix,
+    modelMatrix,
+    invModelMatrix,
     voxels,
   };
 
@@ -94,7 +95,7 @@ export async function exportToBinary(result: ConversionResult): Promise<Blob> {
 
   const buffer = new ArrayBuffer(totalSize);
   const view = new DataView(buffer);
-  const bytes = new Uint8Array(buffer);
+  const bytes = new ByteArray(buffer);
 
   let offset = 0;
 
@@ -138,7 +139,7 @@ export async function exportToBinary(result: ConversionResult): Promise<Blob> {
  * Imports voxel data from compressed binary format (.vxl.gz)
  */
 export async function importFromBinary(file: File): Promise<ConversionResult> {
-  const compressed = new Uint8Array(await file.arrayBuffer());
+  const compressed = new ByteArray(await file.arrayBuffer());
   return importFromArrayBuffer(compressed, file.name);
 }
 
@@ -146,7 +147,7 @@ export async function importFromBinary(file: File): Promise<ConversionResult> {
  * Imports voxel data from ArrayBuffer (for fetch use)
  */
 export async function importFromArrayBuffer(
-  compressed: Uint8Array,
+  compressed: ByteArray,
   filename: string = 'scene.voxgz',
 ): Promise<ConversionResult> {
   const bytes = await gzipDecompress(compressed);
@@ -202,9 +203,9 @@ export async function importFromArrayBuffer(
   const object: VoxelObject = {
     id: filename.replace(/\.voxgz$/, '').replace(/\.vxl\.gz$/, ''),
     dims,
-    model_matrix: modelMatrix,
-    inv_model_matrix: invModelMatrix,
-    voxels: new Uint8Array(voxels), // Copy to avoid detached buffer issues
+    modelMatrix,
+    invModelMatrix,
+    voxels,
   };
 
   // Count non-zero voxels
@@ -229,7 +230,7 @@ export async function importFromArrayBuffer(
 /**
  * Compresses data using gzip
  */
-async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
+async function gzipCompress(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   const stream = new Blob([data]).stream();
   const compressedStream = stream.pipeThrough(new CompressionStream('gzip'));
   const reader = compressedStream.getReader();
@@ -254,14 +255,14 @@ async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
 /**
  * Checks if data is gzip compressed (magic bytes 0x1f 0x8b)
  */
-function isGzipCompressed(data: Uint8Array): boolean {
+function isGzipCompressed(data: ByteArray): boolean {
   return data.length >= 2 && data[0] === 0x1f && data[1] === 0x8b;
 }
 
 /**
  * Decompresses gzip data (or returns as-is if already decompressed)
  */
-async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
+async function gzipDecompress(data: ByteArray): Promise<ByteArray> {
   // Check if data is actually gzip compressed
   // Browsers may auto-decompress when fetching .gz files
   if (!isGzipCompressed(data)) {
@@ -272,7 +273,7 @@ async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
   const decompressedStream = stream.pipeThrough(new DecompressionStream('gzip'));
   const reader = decompressedStream.getReader();
 
-  const chunks: Uint8Array[] = [];
+  const chunks: ByteArray[] = [];
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;

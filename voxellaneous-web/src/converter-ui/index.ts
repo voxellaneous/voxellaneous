@@ -126,7 +126,7 @@ export function initializeConverterUI(pane: Pane, app: AppData): void {
 
       // Display in renderer
       const scene = createSceneFromResult(currentResult);
-      app.renderer.upload_scene(scene);
+      app.renderer.uploadScene(scene);
 
       pane.refresh();
     } catch (error) {
@@ -222,7 +222,7 @@ export function initializeConverterUI(pane: Pane, app: AppData): void {
 
       // Display in renderer
       const scene = createSceneFromResult(currentResult);
-      app.renderer.upload_scene(scene);
+      app.renderer.uploadScene(scene);
 
       pane.refresh();
     } catch (error) {
