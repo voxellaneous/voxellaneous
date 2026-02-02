@@ -89,7 +89,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
         last_axis = 2;
     }
 
-    let MAX_STEPS = 256u;
+    let MAX_STEPS = 2048u;
     for (var i = 0u; i < MAX_STEPS; i = i + 1u) {
         if any(voxel < vec3<i32>(0)) || any(voxel >= vec3<i32>(dims)) {
             break;
@@ -102,7 +102,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             hit_idx = idx;
             hit_voxel = coord;
             hit_t = t;
-            
+
             if last_axis == 0 {
                 hit_normal = vec3<f32>(-f32(step.x), 0.0, 0.0);
             } else if last_axis == 1 {
@@ -110,7 +110,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             } else {
                 hit_normal = vec3<f32>(0.0, 0.0, -f32(step.z));
             }
-            
+
             break;
         }
 

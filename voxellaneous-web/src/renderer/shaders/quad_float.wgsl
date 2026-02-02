@@ -16,7 +16,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
     return out;
 }
 
-@group(0) @binding(0) var u_tex: texture_2d<u32>;
+@group(0) @binding(0) var u_tex: texture_2d<f32>;
 @group(0) @binding(1) var u_samp: sampler;
 
 @fragment
@@ -26,13 +26,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         i32(in.uv.x * f32(dims.x)),
         i32((1.0 - in.uv.y) * f32(dims.y))
     );
-    let texel: vec4<u32> = textureLoad(u_tex, coord, 0);
-    // albedo was Rgba16Uint → normalize by 65535
-    let inv = 1.0 / 65535.0;
-    return vec4<f32>(
-        f32(texel.r) * inv,
-        f32(texel.g) * inv,
-        f32(texel.b) * inv,
-        f32(texel.a) * inv
-    );
+    // float textures can be textureLoad too
+    let texel: vec4<f32> = textureLoad(u_tex, coord, 0);
+    return texel;
 }

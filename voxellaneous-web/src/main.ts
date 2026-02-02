@@ -1,7 +1,7 @@
 import { CameraModule } from './camera';
 import './style.css';
 
-import init, { Renderer } from 'voxellaneous-core';
+import { Renderer } from './renderer';
 import { initializeDevTools } from './editor';
 import { createCornellBoxScene } from '../tests/cornell-box';
 import { Scene } from './scene';
@@ -56,6 +56,7 @@ export type AppData = {
   canvas: HTMLCanvasElement;
   lightDir: { x: number; y: number; z: number };
   ambient: number;
+  lightIntensity: number;
   showBboxes: boolean;
 };
 
@@ -96,7 +97,6 @@ async function initializeApp(): Promise<AppData> {
   const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
   const network = new NetworkClient({ url: wsUrl, roomId });
 
-  await init({});
   const renderer = await Renderer.new(canvas);
   const app: AppData = {
     renderer,
@@ -104,6 +104,7 @@ async function initializeApp(): Promise<AppData> {
     presentTarget: 4, // Default to Lit mode
     lightDir: { x: 0.22, y: 0.22, z: 0.56 },
     ambient: 0.3,
+    lightIntensity: 1.0,
     showBboxes: false,
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
@@ -132,6 +133,7 @@ async function initializeApp(): Promise<AppData> {
       app.presentTarget,
       lightDirArray,
       app.ambient,
+      app.lightIntensity,
       app.showBboxes,
     );
   };
