@@ -6,6 +6,7 @@ struct VSOut {
 struct LightingUniforms {
     light_dir: vec3<f32>,
     ambient:   f32,
+    light_intensity: f32,
 };
 
 @vertex
@@ -48,11 +49,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Normalize light direction (should already be normalized, but just in case)
     let light_dir = normalize(u_lighting.light_dir);
 
-    // N dot L shading
+    // N dot L shading with intensity
     let ndotl = max(dot(normal, light_dir), 0.0);
+    let diffuse = ndotl * u_lighting.light_intensity;
 
     // Combine ambient and diffuse
-    let lighting = u_lighting.ambient + (1.0 - u_lighting.ambient) * ndotl;
+    let lighting = u_lighting.ambient + diffuse;
 
     // Apply lighting to albedo
     let lit_color = albedo.rgb * lighting;
