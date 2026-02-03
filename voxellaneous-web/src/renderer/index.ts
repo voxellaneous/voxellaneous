@@ -314,7 +314,7 @@ export class Renderer {
       depthStencil: {
         format: 'depth24plus-stencil8',
         depthWriteEnabled: true,
-        depthCompare: 'less',
+        depthCompare: 'greater', // Reverse-Z: near=1, far=0
       },
     });
 
@@ -599,7 +599,7 @@ export class Renderer {
         ],
         depthStencilAttachment: {
           view: this.depthTextureView,
-          depthClearValue: 1.0,
+          depthClearValue: 0.0, // Reverse-Z: clear to far (0)
           depthLoadOp: 'clear',
           depthStoreOp: 'discard',
           stencilClearValue: 0,

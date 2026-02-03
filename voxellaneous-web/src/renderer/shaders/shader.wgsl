@@ -154,8 +154,8 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     // Compute correct fragment depth from hit position in world space
     // Transform hit_pos_ws to clip space using VP matrix
     let hit_clip = u_frame.vp_matrix * vec4<f32>(hit_pos_ws, 1.0);
-    // gl-matrix mat4.perspective already uses [0, 1] depth range (WebGPU/Vulkan style)
-    // So we just need perspective divide, no remapping needed
+    // Reverse-Z: projection matrix already swaps near/far, so near objects get ~1.0, far ~0.0
+    // Just do perspective divide, matrix handles the inversion
     let frag_depth = clamp(hit_clip.z / hit_clip.w, 0.0, 1.0);
 
     return GBuffer(
