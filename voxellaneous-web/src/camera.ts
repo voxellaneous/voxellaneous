@@ -64,7 +64,7 @@ export class CameraModule {
 
     const aspectRatio = this.canvas.width / this.canvas.height;
     const projectionMatrix = mat4.create();
-    mat4.perspective(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, 0.01, 10000.0);
+    mat4.perspectiveZO(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, 1.0, 10000.0);
 
     const mvpMatrix = mat4.create();
     mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
