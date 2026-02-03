@@ -1,14 +1,28 @@
 import http from 'http';
 import geckos, { GeckosServer, ServerChannel } from '@geckos.io/server';
-import { EntityState, UserCmd, WorldSnapshot, decodeUserCmd, encodeWorldSnapshot } from './types';
+import {
+  EntityState,
+  UserCmd,
+  WorldSnapshot,
+  decodeUserCmd,
+  decodeUserCmdPacket,
+  encodeWorldSnapshot,
+  encodeWorldDelta,
+  SnapshotDelta,
+} from './types';
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
 const PLAYER_TIMEOUT_MS = Number.parseInt(process.env.PLAYER_TIMEOUT_MS || '300000', 10); // 5 minutes default
+const INTEREST_RADIUS = Number.parseInt(process.env.INTEREST_RADIUS || '1000', 10);
+const CMD_RATE_LIMIT_HZ = Number.parseInt(process.env.CMD_RATE_LIMIT_HZ || '120', 10);
 
 type PlayerEntity = EntityState & {
   channel: ServerChannel;
   input: UserCmd;
   lastInputTime: number;
+  lastProcessedInputSeq: number;
+  lastCmdTime: number;
+  cmdBurst: number;
 };
 
 class GameServer {
@@ -55,27 +69,49 @@ class GameServer {
         viewDir: { x: 0, y: 0, z: 1 },
       },
       lastInputTime: Date.now(),
+      lastProcessedInputSeq: 0,
+      lastCmdTime: 0,
+      cmdBurst: 0,
     };
 
     this.players.set(playerId, player);
 
     // Notify player of their ID
-    channel.emit('welcome', { id: playerId });
+    channel.emit('welcome', { id: playerId }, { reliable: true });
 
     channel.onDisconnect(() => {
       console.log(`Player disconnected: ${playerId}`);
       this.players.delete(playerId);
+      this.lastSnapshotStateByPlayer.delete(playerId);
+      this.lastSnapshotSeqByPlayer.delete(playerId);
+      this.forceFullForPlayer.delete(playerId);
+    });
+
+    channel.on('ping', (data: any) => {
+      const clientTime = typeof data?.clientTime === 'number' ? data.clientTime : Date.now();
+      channel.emit('pong', { clientTime, serverTime: Date.now() });
+    });
+
+    channel.on('resync', () => {
+      this.forceFullForPlayer.add(playerId);
+      this.lastSnapshotStateByPlayer.delete(playerId);
+      this.lastSnapshotSeqByPlayer.delete(playerId);
     });
 
     const handleUserCmd = (data: any) => {
+      if (!this.allowUserCmd(player)) {
+        return;
+      }
       let cmd: UserCmd | null = null;
       try {
         const binary = this.normalizeUserCmdPayload(data);
         if (binary) {
-          cmd = decodeUserCmd(binary);
+          const decoded = decodeUserCmdPacket(binary);
+          cmd = this.sanitizeUserCmd(decoded.cmd);
+          player.lastProcessedInputSeq = decoded.sequence;
         } else if (data && typeof data === 'object' && 'viewDir' in data) {
           // Legacy JSON fallback (should not happen in normal binary flow)
-          cmd = data as UserCmd;
+          cmd = this.sanitizeUserCmd(data as UserCmd);
         }
       } catch (e) {
         console.error('Failed to decode userCmd:', e);
@@ -117,8 +153,79 @@ class GameServer {
     return null;
   }
 
+  private sanitizeUserCmd(cmd: UserCmd): UserCmd {
+    const safeBool = (v: any) => !!v;
+    const safeNum = (v: any) => (Number.isFinite(v) ? v : 0);
+
+    let x = safeNum(cmd.viewDir?.x);
+    let y = safeNum(cmd.viewDir?.y);
+    let z = safeNum(cmd.viewDir?.z);
+
+    const len = Math.sqrt(x * x + y * y + z * z);
+    if (len > 0) {
+      x /= len;
+      y /= len;
+      z /= len;
+    } else {
+      x = 0;
+      y = 0;
+      z = 1;
+    }
+
+    return {
+      forward: safeBool(cmd.forward),
+      backward: safeBool(cmd.backward),
+      left: safeBool(cmd.left),
+      right: safeBool(cmd.right),
+      jump: safeBool(cmd.jump),
+      descend: safeBool(cmd.descend),
+      viewDir: { x, y, z },
+    };
+  }
+
+  private allowUserCmd(player: PlayerEntity): boolean {
+    const now = Date.now();
+    const minIntervalMs = 1000 / CMD_RATE_LIMIT_HZ;
+
+    if (player.lastCmdTime === 0) {
+      player.lastCmdTime = now;
+      player.cmdBurst = 0;
+      return true;
+    }
+
+    const dt = now - player.lastCmdTime;
+    if (dt >= minIntervalMs) {
+      player.lastCmdTime = now;
+      player.cmdBurst = 0;
+      return true;
+    }
+
+    player.cmdBurst += 1;
+    if (player.cmdBurst > 5) {
+      // Drop extra spammy packets.
+      this.metrics.cmdDropped += 1;
+      return false;
+    }
+
+    return true;
+  }
+
   private lastNetworkBroadcast: number = 0;
   private accumulator: number = 0;
+  private snapshotSequence: number = 0;
+  private lastSnapshotStateByPlayer: Map<number, Map<number, EntityState>> = new Map();
+  private lastSnapshotSeqByPlayer: Map<number, number> = new Map();
+  private readonly fullSnapshotInterval = 10;
+  private forceFullForPlayer: Set<number> = new Set();
+  private metrics = {
+    snapshotsSent: 0,
+    deltasSent: 0,
+    bytesSent: 0,
+    snapshotBytes: 0,
+    deltaBytes: 0,
+    cmdDropped: 0,
+    lastLogAt: Date.now(),
+  };
 
   public start() {
     // Run the loop at roughly 60Hz to ensure we process physics often enough
@@ -173,24 +280,165 @@ class GameServer {
   }
 
   private broadcastSnapshot(timestamp: number) {
-    // 2. Broadcast Snapshot
-    const snapshot: WorldSnapshot = {
-      timestamp: timestamp,
-      entities: Array.from(this.players.values()).map(p => ({
-        id: p.id,
-        position: p.position,
-        velocity: p.velocity,
-        rotation: p.rotation
-      }))
-    };
+    const sequence = this.snapshotSequence >>> 0;
+    const allEntities = Array.from(this.players.values()).map(p => ({
+      id: p.id,
+      position: p.position,
+      velocity: p.velocity,
+      rotation: p.rotation,
+    }));
 
-    const payload = encodeWorldSnapshot(snapshot);
-    // Use unreliable channel for binary snapshots
-    if (this.io.raw && typeof this.io.raw.emit === 'function') {
-      this.io.raw.emit(payload);
-    } else {
-      this.io.emit('snapshot', snapshot);
+    for (const player of this.players.values()) {
+      const entities = this.filterEntitiesForPlayer(player, allEntities);
+      const lastState = this.lastSnapshotStateByPlayer.get(player.id) ?? new Map();
+      const lastSeq = this.lastSnapshotSeqByPlayer.get(player.id) ?? 0;
+      const sendFull = this.forceFullForPlayer.has(player.id) || lastState.size === 0 || (sequence % this.fullSnapshotInterval === 0);
+
+      if (sendFull || !player.channel.raw) {
+        const snapshot: WorldSnapshot = {
+          timestamp,
+          sequence,
+          lastProcessedInputSeq: player.lastProcessedInputSeq,
+          entities,
+        };
+        const payload = encodeWorldSnapshot(snapshot);
+        this.sendSnapshotPayloadToChannel(player.channel, payload, snapshot);
+        this.metrics.snapshotsSent += 1;
+        this.metrics.bytesSent += payload.byteLength;
+        this.metrics.snapshotBytes += payload.byteLength;
+        this.lastSnapshotStateByPlayer.set(player.id, this.cloneStateMap(snapshot.entities));
+        this.lastSnapshotSeqByPlayer.set(player.id, sequence);
+        this.forceFullForPlayer.delete(player.id);
+      } else {
+        const delta = this.buildDeltaSnapshot(
+          timestamp,
+          sequence,
+          player.lastProcessedInputSeq,
+          lastSeq,
+          entities,
+          lastState,
+        );
+        const payload = encodeWorldDelta(delta);
+        this.sendSnapshotPayloadToChannel(player.channel, payload);
+        this.metrics.deltasSent += 1;
+        this.metrics.bytesSent += payload.byteLength;
+        this.metrics.deltaBytes += payload.byteLength;
+        this.lastSnapshotStateByPlayer.set(player.id, this.cloneStateMap(entities));
+        this.lastSnapshotSeqByPlayer.set(player.id, sequence);
+      }
     }
+
+    this.snapshotSequence = (this.snapshotSequence + 1) >>> 0;
+    this.logMetrics();
+  }
+
+  private logMetrics() {
+    const now = Date.now();
+    if (now - this.metrics.lastLogAt < 5000) return;
+    const seconds = (now - this.metrics.lastLogAt) / 1000;
+    const snapshotRate = this.metrics.snapshotsSent / seconds;
+    const deltaRate = this.metrics.deltasSent / seconds;
+    const kbps = this.metrics.bytesSent / seconds / 1024;
+    const avgSnapshotBytes = this.metrics.snapshotsSent > 0
+      ? this.metrics.snapshotBytes / this.metrics.snapshotsSent
+      : 0;
+    const avgDeltaBytes = this.metrics.deltasSent > 0
+      ? this.metrics.deltaBytes / this.metrics.deltasSent
+      : 0;
+    const payload = {
+      type: 'net',
+      snapshotsPerSec: Number(snapshotRate.toFixed(1)),
+      deltasPerSec: Number(deltaRate.toFixed(1)),
+      kbps: Number(kbps.toFixed(1)),
+      avgSnapshotBytes: Number(avgSnapshotBytes.toFixed(1)),
+      avgDeltaBytes: Number(avgDeltaBytes.toFixed(1)),
+      cmdDropped: this.metrics.cmdDropped,
+      players: this.players.size,
+    };
+    console.log(JSON.stringify(payload));
+    this.metrics.snapshotsSent = 0;
+    this.metrics.deltasSent = 0;
+    this.metrics.bytesSent = 0;
+    this.metrics.snapshotBytes = 0;
+    this.metrics.deltaBytes = 0;
+    this.metrics.cmdDropped = 0;
+    this.metrics.lastLogAt = now;
+  }
+
+  private buildDeltaSnapshot(
+    timestamp: number,
+    sequence: number,
+    lastProcessedInputSeq: number,
+    baseSequence: number,
+    entities: EntityState[],
+    lastState: Map<number, EntityState>,
+  ): SnapshotDelta {
+    const changed: EntityState[] = [];
+    const currentIds = new Set<number>();
+
+    for (const entity of entities) {
+      currentIds.add(entity.id);
+      const prev = lastState.get(entity.id);
+      if (!prev || !this.isEntityEqual(prev, entity)) {
+        changed.push(entity);
+      }
+    }
+
+    const removedIds: number[] = [];
+    for (const prevId of lastState.keys()) {
+      if (!currentIds.has(prevId)) {
+        removedIds.push(prevId);
+      }
+    }
+
+    return {
+      timestamp,
+      sequence,
+      lastProcessedInputSeq,
+      baseSequence,
+      entities: changed,
+      removedIds,
+    };
+  }
+
+  private isEntityEqual(a: EntityState, b: EntityState): boolean {
+    return (
+      a.position.x === b.position.x &&
+      a.position.y === b.position.y &&
+      a.position.z === b.position.z &&
+      a.velocity.x === b.velocity.x &&
+      a.velocity.y === b.velocity.y &&
+      a.velocity.z === b.velocity.z &&
+      a.rotation.x === b.rotation.x &&
+      a.rotation.y === b.rotation.y &&
+      a.rotation.z === b.rotation.z &&
+      a.rotation.w === b.rotation.w
+    );
+  }
+
+  private sendSnapshotPayloadToChannel(channel: ServerChannel, payload: ArrayBuffer, snapshot?: WorldSnapshot) {
+    if (channel.raw && typeof channel.raw.emit === 'function') {
+      channel.raw.emit(payload);
+    } else if (snapshot) {
+      channel.emit('snapshot', snapshot);
+    }
+  }
+
+  private cloneStateMap(entities: EntityState[]): Map<number, EntityState> {
+    return new Map(
+      entities.map(e => [e.id, { ...e, position: { ...e.position }, velocity: { ...e.velocity }, rotation: { ...e.rotation } }]),
+    );
+  }
+
+  private filterEntitiesForPlayer(player: PlayerEntity, entities: EntityState[]): EntityState[] {
+    const radiusSq = INTEREST_RADIUS * INTEREST_RADIUS;
+    return entities.filter((entity) => {
+      if (entity.id === player.id) return true;
+      const dx = entity.position.x - player.position.x;
+      const dy = entity.position.y - player.position.y;
+      const dz = entity.position.z - player.position.z;
+      return dx * dx + dy * dy + dz * dz <= radiusSq;
+    });
   }
 
   private simulatePlayer(player: PlayerEntity, dt: number) {

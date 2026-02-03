@@ -218,6 +218,8 @@ async function initializeApp(): Promise<AppData> {
     window.clearInterval(remoteSceneInterval);
   });
 
+  let lastReconciledSeq: number | null = null;
+
   // RENDER LOOP
   const render: FrameRequestCallback = (time) => {
     autoresizeCanvas();
@@ -228,15 +230,19 @@ async function initializeApp(): Promise<AppData> {
     const dt = profilerData.frameTime / 1000;
     cameraModule.update(dt);
 
-    // Send Input to Server
-    // Use CameraModule as source of truth for inputs
-    const cmd = cameraModule.getUserCmd();
-    network.sendInput(cmd);
+    // Send Input to Server (block when not focused)
+    if (cameraModule.isFocused()) {
+      const cmd = cameraModule.getUserCmd();
+      network.sendInput(cmd, dt);
+    }
 
     // Server Reconciliation
     // Check if server disagrees with our position
     const serverState = network.getMyLatestState();
-    if (serverState) {
+    const snapshotSeq = network.getLatestSnapshotSequence();
+    if (serverState && snapshotSeq !== null && snapshotSeq !== lastReconciledSeq) {
+      lastReconciledSeq = snapshotSeq;
+      const pending = network.getPendingInputs();
       const { x: sx, y: sy, z: sz } = serverState.position;
       const [cx, cy, cz] = cameraModule.position;
 
@@ -250,7 +256,13 @@ async function initializeApp(): Promise<AppData> {
       const CORRECTION_THRESHOLD = 0.5; // If > 0.5 units, lerp
       const LERP_FACTOR = 0.1; // 10% correction per frame (~6x speed towards target)
 
-      if (distSq > SNAP_THRESHOLD * SNAP_THRESHOLD) {
+      if (pending.length > 0) {
+        // Replay pending inputs from authoritative state
+        cameraModule.setPosition([sx, sy, sz]);
+        for (const input of pending) {
+          cameraModule.applyUserCmd(input.cmd, input.dt);
+        }
+      } else if (distSq > SNAP_THRESHOLD * SNAP_THRESHOLD) {
         // Snap
         console.warn('Reconciliation hard snap!', distSq);
         cameraModule.setPosition([sx, sy, sz]);

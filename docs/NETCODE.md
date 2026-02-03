@@ -28,10 +28,22 @@
 - `encodeUserCmd(cmd): ArrayBuffer`
 - `decodeUserCmd(buffer): UserCmd`
 
+### UserCmd packet (с sequence)
+**Размер**: 17 байт.
+
+**Layout**:
+```
+[Seq u32] [Keys u8] [ViewDir.x f32] [ViewDir.y f32] [ViewDir.z f32]
+```
+
+**Кодеки**:
+- `encodeUserCmdPacket(cmd, seq): ArrayBuffer`
+- `decodeUserCmdPacket(buffer): { sequence, cmd }`
+
 ## WorldSnapshot (снимок мира)
 **Header**:
 ```
-[Timestamp f64] [Count u16]
+[Type u8] [Timestamp f64] [Sequence u32] [LastInputSeq u32] [Count u16]
 ```
 
 **Entity (фиксированный размер 44 байта)**:
@@ -51,7 +63,18 @@
 
 ### Кодеки
 - `encodeWorldSnapshot(snapshot): ArrayBuffer`
-- `decodeWorldSnapshot(buffer): WorldSnapshot`
+- `decodeNetMessage(buffer): SnapshotFull | SnapshotDelta`
+
+### Delta-снапшот
+**Header**:
+```
+[Type u8] [Timestamp f64] [Sequence u32] [LastInputSeq u32] [BaseSequence u32]
+[Count u16] [RemovedCount u16]
+```
+Далее идут `Count` сущностей (тот же фиксированный layout) и список `RemovedCount` id (`u32`).
+
+**Кодеки**:
+- `encodeWorldDelta(delta): ArrayBuffer`
 
 ## ID игроков
 - `EntityState.id` — это `u32` (числовой идентификатор), выдаётся сервером при подключении.

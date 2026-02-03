@@ -7,10 +7,12 @@
   "scripts": {
     "start": "node dist/server.js",
     "dev": "tsx server.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "bots": "tsx scripts/bot-clients.ts"
   },
   "dependencies": {
     "@geckos.io/server": "^3.0.2",
+    "@geckos.io/client": "^3.0.2",
     "ws": "^8.16.0"
   },
   "devDependencies": {

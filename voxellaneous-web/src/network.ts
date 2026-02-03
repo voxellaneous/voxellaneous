@@ -1,18 +1,43 @@
 import geckos, { ClientChannel } from '@geckos.io/client';
-import { EntityState, UserCmd, WorldSnapshot, encodeUserCmd, decodeWorldSnapshot } from './common/types';
+import {
+  EntityState,
+  UserCmd,
+  WorldSnapshot,
+  encodeUserCmdPacket,
+  decodeNetMessage,
+  NetPacketType,
+} from './common/types';
 
 type NetworkOptions = {
   url: string;
+  timeSync?: {
+    maxRttMs?: number;
+    windowSize?: number;
+    smoothing?: number;
+  };
 };
 
 
 
 export class NetworkClient {
   private channel: ClientChannel;
-  private entities: Map<string, EntityState> = new Map();
+  private entities: Map<number | 'ME', EntityState> = new Map();
   private myId: number | null = null;
   private snapshots: WorldSnapshot[] = [];
+  private lastSnapshotSeq: number | null = null;
   private isConnected = false;
+  private serverTimeOffsetMs = 0;
+  private timeOffsetSamples: number[] = [];
+  private readonly timeOffsetWindow: number;
+  private readonly maxRttMs: number;
+  private readonly timeOffsetSmoothing: number;
+  private pingIntervalId: number | null = null;
+  private snapshotState: Map<number, EntityState> = new Map();
+  private lastAppliedSequence: number | null = null;
+  private latestServerSnapshotSeq: number | null = null;
+  private inputSequence: number = 0;
+  private pendingInputs: Array<{ sequence: number; cmd: UserCmd; dt: number }> = [];
+  private lastResyncAt = 0;
 
   constructor(options: NetworkOptions) {
     // Geckos client configuration
@@ -28,6 +53,10 @@ export class NetworkClient {
 
     console.log(`Connecting to Geckos: url=${url}, port=${port}`);
     this.channel = geckos({ url, port });
+
+    this.maxRttMs = options.timeSync?.maxRttMs ?? 200;
+    this.timeOffsetWindow = options.timeSync?.windowSize ?? 10;
+    this.timeOffsetSmoothing = options.timeSync?.smoothing ?? 0.2;
 
     this.channel.onConnect((error) => {
       if (error) {
@@ -47,12 +76,32 @@ export class NetworkClient {
         this.handleSnapshot(data as WorldSnapshot);
       });
 
+      this.channel.on('pong', (data: any) => {
+        if (!data || typeof data.clientTime !== 'number' || typeof data.serverTime !== 'number') return;
+        const now = Date.now();
+        const rtt = now - data.clientTime;
+        if (rtt > this.maxRttMs) return;
+        const estimate = data.serverTime - (data.clientTime + rtt / 2);
+        this.pushTimeOffsetSample(estimate);
+      });
+
+      if (this.pingIntervalId === null) {
+        this.pingIntervalId = window.setInterval(() => {
+          const clientTime = Date.now();
+          this.channel.emit('ping', { clientTime });
+        }, 1000);
+      }
+
       const rawChannel = this.channel as any;
       if (typeof rawChannel.onRaw === 'function') {
         rawChannel.onRaw((data: any) => {
           try {
-            const snapshot = decodeWorldSnapshot(data);
-            this.handleSnapshot(snapshot);
+            const message = decodeNetMessage(data);
+            if (message.type === NetPacketType.SnapshotFull) {
+              this.handleSnapshot(message.snapshot);
+            } else if (message.type === NetPacketType.SnapshotDelta) {
+              this.handleDelta(message.delta);
+            }
           } catch (e) {
             console.error('Failed to decode binary snapshot:', e);
           }
@@ -61,10 +110,13 @@ export class NetworkClient {
     });
   }
 
-  public sendInput(cmd: UserCmd) {
+  public sendInput(cmd: UserCmd, dt: number) {
     if (!this.isConnected) return;
     // Binary Optimized
-    const buffer = encodeUserCmd(cmd);
+    const sequence = this.inputSequence >>> 0;
+    this.inputSequence = (this.inputSequence + 1) >>> 0;
+    this.pendingInputs.push({ sequence, cmd, dt });
+    const buffer = encodeUserCmdPacket(cmd, sequence);
     if (this.channel.raw && typeof this.channel.raw.emit === 'function') {
       this.channel.raw.emit(buffer);
       return;
@@ -73,6 +125,17 @@ export class NetworkClient {
   }
 
   private handleSnapshot(snapshot: WorldSnapshot) {
+    if (this.lastSnapshotSeq !== null && snapshot.sequence <= this.lastSnapshotSeq) {
+      return;
+    }
+    this.lastSnapshotSeq = snapshot.sequence;
+    this.lastAppliedSequence = snapshot.sequence;
+    this.latestServerSnapshotSeq = snapshot.sequence;
+    this.applyInputAck(snapshot.lastProcessedInputSeq);
+    this.snapshotState.clear();
+    snapshot.entities.forEach((entity) => {
+      this.snapshotState.set(entity.id, entity);
+    });
     this.snapshots.push(snapshot);
     // Keep buffer small (e.g. 1 second worth or just 20 frames)
     if (this.snapshots.length > 30) {
@@ -92,12 +155,59 @@ export class NetworkClient {
     });
   }
 
+  private handleDelta(delta: {
+    timestamp: number;
+    sequence: number;
+    lastProcessedInputSeq: number;
+    baseSequence: number;
+    entities: EntityState[];
+    removedIds: number[];
+  }) {
+    if (this.lastAppliedSequence === null || delta.baseSequence !== this.lastAppliedSequence) {
+      this.requestResync();
+      return;
+    }
+
+    this.lastAppliedSequence = delta.sequence;
+    this.lastSnapshotSeq = delta.sequence;
+    this.latestServerSnapshotSeq = delta.sequence;
+    this.applyInputAck(delta.lastProcessedInputSeq);
+
+    for (const entity of delta.entities) {
+      this.snapshotState.set(entity.id, entity);
+    }
+    for (const id of delta.removedIds) {
+      this.snapshotState.delete(id);
+    }
+
+    const snapshot: WorldSnapshot = {
+      timestamp: delta.timestamp,
+      sequence: delta.sequence,
+      lastProcessedInputSeq: delta.lastProcessedInputSeq,
+      entities: Array.from(this.snapshotState.values()),
+    };
+
+    this.snapshots.push(snapshot);
+    if (this.snapshots.length > 30) {
+      this.snapshots.shift();
+    }
+
+    this.entities.clear();
+    snapshot.entities.forEach(entity => {
+      if (entity.id !== this.myId) {
+        this.entities.set(entity.id, entity);
+      } else {
+        this.entities.set('ME', entity);
+      }
+    });
+  }
+
   public getRemoteEntities(): EntityState[] {
     // 60Hz Server Update -> ~16.6ms per frame.
     // We need at least 2 frames buffered (33ms). 
     // 45ms gives a safe margin for jitter.
     const INTERPOLATION_DELAY_MS = 45;
-    const now = Date.now();
+    const serverNow = Date.now() + this.serverTimeOffsetMs;
 
     // We assume server time is approximately local time BUT we don't have perfect sync.
     // However, the timestamps in snapshot are Server Time.
@@ -109,7 +219,7 @@ export class NetworkClient {
     if (this.snapshots.length < 2) return [];
 
     const latestSnapshot = this.snapshots[this.snapshots.length - 1];
-    const renderTime = latestSnapshot.timestamp - INTERPOLATION_DELAY_MS;
+    const renderTime = serverNow - INTERPOLATION_DELAY_MS;
 
     // Find two snapshots surrounding renderTime
     let t1 = this.snapshots[0];
@@ -175,7 +285,53 @@ export class NetworkClient {
     return this.entities.get('ME');
   }
 
+  public getLatestSnapshotSequence(): number | null {
+    return this.latestServerSnapshotSeq;
+  }
   public getMyId(): number | null {
     return this.myId;
+  }
+
+  private pushTimeOffsetSample(estimate: number) {
+    this.timeOffsetSamples.push(estimate);
+    if (this.timeOffsetSamples.length > this.timeOffsetWindow) {
+      this.timeOffsetSamples.shift();
+    }
+    const sorted = [...this.timeOffsetSamples].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+    this.serverTimeOffsetMs = this.serverTimeOffsetMs + (median - this.serverTimeOffsetMs) * this.timeOffsetSmoothing;
+  }
+
+  public getPendingInputs(): Array<{ sequence: number; cmd: UserCmd; dt: number }> {
+    return this.pendingInputs;
+  }
+
+  private applyInputAck(lastProcessedInputSeq: number) {
+    if (this.pendingInputs.length === 0) return;
+    let idx = 0;
+    while (idx < this.pendingInputs.length && this.pendingInputs[idx].sequence <= lastProcessedInputSeq) {
+      idx += 1;
+    }
+    if (idx > 0) {
+      this.pendingInputs.splice(0, idx);
+    }
+  }
+
+  private requestResync() {
+    const now = Date.now();
+    if (now - this.lastResyncAt < 1000) return;
+    this.lastResyncAt = now;
+    this.snapshots.length = 0;
+    this.snapshotState.clear();
+    this.lastAppliedSequence = null;
+    this.lastSnapshotSeq = null;
+    const payload = {
+      lastSnapshotSeq: this.latestServerSnapshotSeq,
+    };
+    const channelAny = this.channel as any;
+    if (typeof channelAny.emit === 'function') {
+      channelAny.emit('resync', payload, { reliable: true });
+    }
   }
 }

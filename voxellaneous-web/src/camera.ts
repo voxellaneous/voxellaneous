@@ -1,4 +1,5 @@
 import { mat4, vec3 } from 'gl-matrix';
+import type { UserCmd } from './common/types';
 
 const maxCameraPitch = Math.PI / 2 - 0.1;
 const mouseSensitivity = 0.001;
@@ -147,5 +148,64 @@ export class CameraModule {
 
     this.updateCameraDirection();
     this.updateCameraPosition(dt);
+  }
+
+  applyUserCmd(cmd: UserCmd, dt: number) {
+    const dir = vec3.fromValues(cmd.viewDir.x, cmd.viewDir.y, cmd.viewDir.z);
+    if (vec3.length(dir) > 0) {
+      vec3.normalize(dir, dir);
+      vec3.copy(this.camera.direction, dir);
+      vec3.cross(this.camera.right, this.camera.direction, this.camera.up);
+      vec3.normalize(this.camera.right, this.camera.right);
+    }
+
+    let mx = 0;
+    let my = 0;
+    let mz = 0;
+
+    const dirX = cmd.viewDir.x || 0;
+    const dirZ = cmd.viewDir.z || 0;
+    const rightX = -dirZ;
+    const rightZ = dirX;
+
+    if (cmd.forward) {
+      mx += dirX;
+      mz += dirZ;
+    }
+    if (cmd.backward) {
+      mx -= dirX;
+      mz -= dirZ;
+    }
+    if (cmd.right) {
+      const len = Math.sqrt(rightX * rightX + rightZ * rightZ);
+      const nrX = len > 0 ? rightX / len : 0;
+      const nrZ = len > 0 ? rightZ / len : 0;
+      mx += nrX;
+      mz += nrZ;
+    }
+    if (cmd.left) {
+      const len = Math.sqrt(rightX * rightX + rightZ * rightZ);
+      const nrX = len > 0 ? rightX / len : 0;
+      const nrZ = len > 0 ? rightZ / len : 0;
+      mx -= nrX;
+      mz -= nrZ;
+    }
+    if (cmd.jump) {
+      my += 1;
+    }
+    if (cmd.descend) {
+      my -= 1;
+    }
+
+    const mLen = Math.sqrt(mx * mx + my * my + mz * mz);
+    if (mLen > 0) {
+      mx /= mLen;
+      my /= mLen;
+      mz /= mLen;
+      const moveStep = this.camera.speed * dt;
+      this.camera.position[0] += mx * moveStep;
+      this.camera.position[1] += my * moveStep;
+      this.camera.position[2] += mz * moveStep;
+    }
   }
 }
