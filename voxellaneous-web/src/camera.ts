@@ -13,7 +13,7 @@ export class CameraModule {
     up: [0, 1, 0] as vec3,
     yaw: 0,
     pitch: 0,
-    speed: 1.0,
+    speed: 60.0,
   };
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -97,7 +97,7 @@ export class CameraModule {
     vec3.normalize(this.camera.right, this.camera.right);
   }
 
-  private updateCameraPosition() {
+  private updateCameraPosition(dt: number) {
     let motion: vec3 = [0, 0, 0];
     if (this.keysPressedState['KeyW']) {
       const [x, _, z] = this.camera.direction;
@@ -124,14 +124,28 @@ export class CameraModule {
     if (vec3.length(motion) === 0) return;
 
     vec3.normalize(motion, motion);
-    vec3.scale(motion, motion, this.camera.speed);
+    // Speed is units per second now
+    vec3.scale(motion, motion, this.camera.speed * dt);
     vec3.add(this.camera.position, this.camera.position, motion);
   }
 
-  update() {
+  getUserCmd(): import('./common/types').UserCmd {
+    const dir = this.camera.direction;
+    return {
+      forward: !!this.keysPressedState['KeyW'],
+      backward: !!this.keysPressedState['KeyS'],
+      left: !!this.keysPressedState['KeyA'],
+      right: !!this.keysPressedState['KeyD'],
+      jump: !!this.keysPressedState['Space'],
+      descend: !!this.keysPressedState['ShiftLeft'],
+      viewDir: { x: dir[0], y: dir[1], z: dir[2] },
+    };
+  }
+
+  update(dt: number) {
     if (!this.isFocused()) return;
 
     this.updateCameraDirection();
-    this.updateCameraPosition();
+    this.updateCameraPosition(dt);
   }
 }

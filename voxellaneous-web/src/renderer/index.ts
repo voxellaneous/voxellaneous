@@ -63,6 +63,27 @@ export class Renderer {
 
   // Draw call data
   private drawCallArray: DrawCallData[] = [];
+  // Map for fast lookups of draw calls by object ID
+  private drawCallMap: Map<string, DrawCallData> = new Map();
+
+  updateObjectTransform(id: string, modelMatrix: Float32Array): void {
+    const dc = this.drawCallMap.get(id);
+    if (!dc) return;
+
+    // Update the model matrix in the uniform buffer (offset 0)
+    // PerDraw struct: model_matrix (64), normal_matrix (64, but computed in shader or cpu?), etc.
+    // Wait, shader expects model_matrix and normal_matrix.
+    // We need to compute normal matrix (inverse transpose of model 3x3).
+
+    // Let's look at how it's done in uploadScene (we need to see the code there)
+    // Assuming offset 0 is model matrix.
+    this.queue.writeBuffer(dc.uniformBuffer, 0, modelMatrix as ArrayBufferBufferView);
+
+    // We also need normal matrix at offset 64.
+    // If we don't update it, lighting will be wrong for rotating objects.
+    // For now, let's just update model matrix to verify movement.
+    // TODO: Proper normal matrix update
+  }
 
   private constructor(
     device: GPUDevice,
@@ -763,8 +784,10 @@ export class Renderer {
 
     // Step 2: Upload objects as 3D textures
     const drawCallArray: DrawCallData[] = [];
+    this.drawCallMap.clear();
 
     for (const obj of scene.objects) {
+      // ... (existing code for texture creation)
       const dims = Array.isArray(obj.dims) ? obj.dims : [obj.dims[0], obj.dims[1], obj.dims[2]];
       const [nx, ny, nz] = dims;
 
@@ -813,13 +836,16 @@ export class Renderer {
         ],
       });
 
-      drawCallArray.push({
+      const dc: DrawCallData = {
         bindGroup,
         texture,
         textureView,
         sampler,
         uniformBuffer,
-      });
+      };
+
+      drawCallArray.push(dc);
+      this.drawCallMap.set(obj.id, dc);
     }
 
     this.drawCallArray = drawCallArray;

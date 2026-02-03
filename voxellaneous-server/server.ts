@@ -1,267 +1,289 @@
 import http from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
-
-type Peer = {
-  ws: WebSocket;
-  peerId: string | null;
-  roomId: string | null;
-  lastSeen: number;
-};
-
-type UnknownRecord = Record<string, unknown>;
+import geckos, { GeckosServer, ServerChannel } from '@geckos.io/server';
+import { EntityState, UserCmd, WorldSnapshot, decodeUserCmd, encodeWorldSnapshot } from './types';
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
-const DEFAULT_ROOM = process.env.DEFAULT_ROOM || 'lobby';
-const TIMEOUT_MS = Number.parseInt(process.env.TIMEOUT_MS || '15000', 10);
-const CLEANUP_INTERVAL_MS = Number.parseInt(process.env.CLEANUP_INTERVAL_MS || '5000', 10);
-const MAX_PEERS = Number.parseInt(process.env.MAX_PEERS || '8', 10);
+const PLAYER_TIMEOUT_MS = Number.parseInt(process.env.PLAYER_TIMEOUT_MS || '300000', 10); // 5 minutes default
 
-const server = http.createServer();
-const wss = new WebSocketServer({ server });
+type PlayerEntity = EntityState & {
+  channel: ServerChannel;
+  input: UserCmd;
+  lastInputTime: number;
+};
 
-const rooms = new Map<string, Map<string, Peer>>();
-let peerCounter = 0;
+class GameServer {
+  private io: GeckosServer;
+  private players: Map<number, PlayerEntity> = new Map();
+  private lastTimestamp: number = Date.now();
+  private nextPlayerId = 1;
 
-function getRoom(roomId: string): Map<string, Peer> {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, new Map());
-  }
-  return rooms.get(roomId)!;
-}
-
-function generatePeerId(): string {
-  peerCounter += 1;
-  return `peer-${peerCounter}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function safeJsonParse(data: string): unknown | null {
-  try {
-    return JSON.parse(data);
-  } catch {
-    return null;
-  }
-}
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return value !== null && typeof value === 'object';
-}
-
-function sendJson(ws: WebSocket, message: unknown): void {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(JSON.stringify(message));
-  }
-}
-
-function broadcast(roomId: string, message: unknown, excludePeerId?: string): void {
-  const room = rooms.get(roomId);
-  if (!room) return;
-  for (const [peerId, peer] of room.entries()) {
-    if (excludePeerId && peerId === excludePeerId) continue;
-    sendJson(peer.ws, message);
-  }
-}
-
-function removePeer(peer: Peer, reason: string): void {
-  if (!peer.roomId || !peer.peerId) return;
-  const room = rooms.get(peer.roomId);
-  if (!room) return;
-
-  if (room.has(peer.peerId)) {
-    room.delete(peer.peerId);
-    broadcast(
-      peer.roomId,
-      {
-        type: 'leave',
-        roomId: peer.roomId,
-        payload: {
-          id: peer.peerId,
-          reason,
-        },
-      },
-      peer.peerId,
-    );
-  }
-
-  if (room.size === 0) {
-    rooms.delete(peer.roomId);
-  }
-
-  peer.peerId = null;
-  peer.roomId = null;
-}
-
-function coerceRoomId(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number') return value.toString();
-  return DEFAULT_ROOM;
-}
-
-function handleJoin(peer: Peer, message: UnknownRecord): void {
-  const roomId = coerceRoomId(message.roomId);
-  const room = getRoom(roomId);
-
-  if (room.size >= MAX_PEERS) {
-    sendJson(peer.ws, {
-      type: 'join',
-      roomId,
-      payload: {
-        error: 'room_full',
-      },
+  constructor() {
+    this.io = geckos({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+      ],
     });
-    return;
+
+    this.io.addServer(http.createServer().listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
+    }));
+
+    this.io.onConnection((channel: ServerChannel) => {
+      console.log(`Player connected: ${channel.id}`);
+      this.handleConnection(channel);
+    });
   }
 
-  if (!peer.peerId) {
-    peer.peerId = generatePeerId();
-  }
+  private handleConnection(channel: ServerChannel) {
+    const playerId = this.nextPlayerId >>> 0;
+    this.nextPlayerId = (this.nextPlayerId + 1) >>> 0;
 
-  peer.roomId = roomId;
-  peer.lastSeen = Date.now();
-  room.set(peer.peerId, peer);
-
-  const peers = Array.from(room.keys()).filter((id) => id !== peer.peerId);
-
-  sendJson(peer.ws, {
-    type: 'join',
-    roomId,
-    payload: {
-      peerId: peer.peerId,
-      peers,
-    },
-  });
-
-  broadcast(
-    roomId,
-    {
-      type: 'join',
-      roomId,
-      payload: {
-        peerId: peer.peerId,
+    // Initial state
+    const player: PlayerEntity = {
+      id: playerId,
+      position: { x: -100, y: -470, z: -356 }, // Match client spawn
+      velocity: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 },
+      channel: channel,
+      input: {
+        forward: false,
+        backward: false,
+        left: false,
+        right: false,
+        jump: false,
+        descend: false,
+        viewDir: { x: 0, y: 0, z: 1 },
       },
-    },
-    peer.peerId,
-  );
-}
+      lastInputTime: Date.now(),
+    };
 
-function handleLeave(peer: Peer, message: UnknownRecord): void {
-  if (!peer.peerId || !peer.roomId) return;
-  peer.lastSeen = Date.now();
-  const payload = isRecord(message.payload) ? message.payload : undefined;
-  const reason =
-    payload && typeof payload.reason === 'string' ? payload.reason : 'client_close';
-  removePeer(peer, reason);
-}
+    this.players.set(playerId, player);
 
-function handlePing(peer: Peer): void {
-  if (!peer.peerId || !peer.roomId) return;
-  peer.lastSeen = Date.now();
-  sendJson(peer.ws, {
-    type: 'pong',
-    roomId: peer.roomId,
-    payload: {
-      timestamp: Date.now(),
-    },
-  });
-}
+    // Notify player of their ID
+    channel.emit('welcome', { id: playerId });
 
-function parseTargetPayload(payload: unknown): { to: string; sdp?: string; candidate?: string } | null {
-  if (!isRecord(payload)) return null;
-  if (typeof payload.to !== 'string') return null;
-  return {
-    to: payload.to,
-    sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
-    candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
-  };
-}
+    channel.onDisconnect(() => {
+      console.log(`Player disconnected: ${playerId}`);
+      this.players.delete(playerId);
+    });
 
-function forwardToPeer(peer: Peer, message: UnknownRecord, type: string): void {
-  if (!peer.peerId || !peer.roomId) return;
-  const payload = parseTargetPayload(message.payload);
-  if (!payload) return;
-
-  const room = rooms.get(peer.roomId);
-  if (!room) return;
-  const target = room.get(payload.to);
-  if (!target) return;
-
-  sendJson(target.ws, {
-    type,
-    roomId: peer.roomId,
-    payload: {
-      from: peer.peerId,
-      to: payload.to,
-      sdp: payload.sdp,
-      candidate: payload.candidate,
-    },
-  });
-}
-
-function handleMessage(peer: Peer, data: WebSocket.RawData): void {
-  const text = typeof data === 'string' ? data : data.toString('utf8');
-  const message = safeJsonParse(text);
-  if (!message || !isRecord(message) || typeof message.type !== 'string') {
-    return;
-  }
-
-  switch (message.type) {
-    case 'join':
-      handleJoin(peer, message);
-      break;
-    case 'leave':
-      handleLeave(peer, message);
-      break;
-    case 'offer':
-      forwardToPeer(peer, message, 'offer');
-      break;
-    case 'answer':
-      forwardToPeer(peer, message, 'answer');
-      break;
-    case 'ice':
-      forwardToPeer(peer, message, 'ice');
-      break;
-    case 'ping':
-      handlePing(peer);
-      break;
-    default:
-      break;
-  }
-}
-
-wss.on('connection', (ws) => {
-  const peer: Peer = {
-    ws,
-    peerId: null,
-    roomId: null,
-    lastSeen: Date.now(),
-  };
-
-  ws.on('message', (data) => {
-    handleMessage(peer, data);
-  });
-
-  ws.on('close', () => {
-    removePeer(peer, 'client_close');
-  });
-
-  ws.on('error', () => {
-    removePeer(peer, 'client_error');
-  });
-});
-
-setInterval(() => {
-  const now = Date.now();
-  for (const room of rooms.values()) {
-    for (const peer of room.values()) {
-      if (now - peer.lastSeen > TIMEOUT_MS) {
-        try {
-          peer.ws.terminate();
-        } catch {
-          // ignore
+    const handleUserCmd = (data: any) => {
+      let cmd: UserCmd | null = null;
+      try {
+        const binary = this.normalizeUserCmdPayload(data);
+        if (binary) {
+          cmd = decodeUserCmd(binary);
+        } else if (data && typeof data === 'object' && 'viewDir' in data) {
+          // Legacy JSON fallback (should not happen in normal binary flow)
+          cmd = data as UserCmd;
         }
-        removePeer(peer, 'timeout');
+      } catch (e) {
+        console.error('Failed to decode userCmd:', e);
+      }
+
+      if (!cmd) return;
+      player.input = cmd;
+      player.lastInputTime = Date.now();
+    };
+
+    if (typeof channel.onRaw === 'function') {
+      channel.onRaw(handleUserCmd);
+    }
+    channel.on('userCmd', handleUserCmd);
+  }
+
+  private normalizeUserCmdPayload(data: any): ArrayBuffer | ArrayBufferView | null {
+    if (!data) return null;
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      return data;
+    }
+    if (Array.isArray(data)) {
+      return new Uint8Array(data);
+    }
+    if (data && data.type === 'Buffer' && Array.isArray(data.data)) {
+      return new Uint8Array(data.data);
+    }
+    if (data && typeof data === 'object' && typeof data.length === 'number') {
+      const len = data.length >>> 0;
+      if (len > 0) {
+        const arr = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          const v = data[i];
+          arr[i] = typeof v === 'number' ? v : 0;
+        }
+        return arr;
       }
     }
+    return null;
   }
-}, CLEANUP_INTERVAL_MS);
 
-server.listen(PORT);
+  private lastNetworkBroadcast: number = 0;
+  private accumulator: number = 0;
+
+  public start() {
+    // Run the loop at roughly 60Hz to ensure we process physics often enough
+    const TICK_RATE_MS = 1000 / 60;
+    setInterval(() => this.tick(), TICK_RATE_MS);
+  }
+
+  private tick() {
+    const now = Date.now();
+    // Frame time limit to prevent "Spiral of Death" if server lags heavily
+    let frameTime = now - this.lastTimestamp;
+    if (frameTime > 250) frameTime = 250;
+
+    this.lastTimestamp = now;
+    this.accumulator += frameTime;
+
+    const PHYSICS_RATE = 60;
+    const PHYSICS_DT_SEC = 1.0 / PHYSICS_RATE;
+    const PHYSICS_DT_MS = 1000 / PHYSICS_RATE;
+
+    // Fixed Update Step
+    while (this.accumulator >= PHYSICS_DT_MS) {
+      this.fixedUpdate(PHYSICS_DT_SEC);
+      this.accumulator -= PHYSICS_DT_MS;
+    }
+
+    // Network Broadcast Step
+    // Tuning: 60Hz for maximum smoothness/responsiveness (High Bandwidth!)
+    const NETWORK_RATE = 60;
+    const NETWORK_INTERVAL_MS = 1000 / NETWORK_RATE;
+
+    if (now - this.lastNetworkBroadcast >= NETWORK_INTERVAL_MS) {
+      this.broadcastSnapshot(now);
+      this.lastNetworkBroadcast = now;
+    }
+
+    // Check for timeouts
+    this.players.forEach((player) => {
+      if (now - player.lastInputTime > PLAYER_TIMEOUT_MS) {
+        console.log(`Player ${player.id} timed out (AFK)`);
+        player.channel.close();
+        this.players.delete(player.id);
+      }
+    });
+  }
+
+  private fixedUpdate(dt: number) {
+    // 1. Simulate Physics
+    this.players.forEach((player) => {
+      this.simulatePlayer(player, dt);
+    });
+  }
+
+  private broadcastSnapshot(timestamp: number) {
+    // 2. Broadcast Snapshot
+    const snapshot: WorldSnapshot = {
+      timestamp: timestamp,
+      entities: Array.from(this.players.values()).map(p => ({
+        id: p.id,
+        position: p.position,
+        velocity: p.velocity,
+        rotation: p.rotation
+      }))
+    };
+
+    const payload = encodeWorldSnapshot(snapshot);
+    // Use unreliable channel for binary snapshots
+    if (this.io.raw && typeof this.io.raw.emit === 'function') {
+      this.io.raw.emit(payload);
+    } else {
+      this.io.emit('snapshot', snapshot);
+    }
+  }
+
+  private simulatePlayer(player: PlayerEntity, dt: number) {
+    const speed = 60; // Match client speed
+    const { input } = player;
+
+    // We must match camera.ts logic EXACTLY
+    // 1. Accumulate motion vector
+    let mx = 0;
+    let my = 0;
+    let mz = 0;
+
+    const dirX = input.viewDir?.x || 0;
+    const dirY = input.viewDir?.y || 0; // Unused for horizontal motion
+    const dirZ = input.viewDir?.z || 0;
+
+    // Camera Direction - Projected on XZ plane implies ignoring Y
+    // Camera.ts: [x, _, z] = direction.
+    // So we use viewDir as is but only utilize x and z components for Forward/Back.
+    const forwardX = dirX;
+    const forwardZ = dirZ;
+
+    // Client Right vector logic:
+    // vec3.cross(right, dir, up). If up is (0,1,0):
+    // right = (-dirZ, 0, dirX). normalized.
+    // Let's rely on standard math:
+    const rightX = -dirZ;
+    const rightZ = dirX;
+
+    // Note: Since we will normalize the final SUM, we don't strictly need to normalize 'right' yet 
+    // IF the client accumulates un-normalized vectors.
+
+    if (input.forward) {
+      mx += forwardX;
+      mz += forwardZ;
+    }
+    if (input.backward) {
+      mx -= forwardX;
+      mz -= forwardZ;
+    }
+    if (input.right) {
+      const len = Math.sqrt(rightX * rightX + rightZ * rightZ);
+      const nrX = len > 0 ? rightX / len : 0;
+      const nrZ = len > 0 ? rightZ / len : 0;
+
+      mx += nrX;
+      mz += nrZ;
+    }
+    if (input.left) {
+      const len = Math.sqrt(rightX * rightX + rightZ * rightZ);
+      const nrX = len > 0 ? rightX / len : 0;
+      const nrZ = len > 0 ? rightZ / len : 0;
+
+      mx -= nrX;
+      mz -= nrZ;
+    }
+
+    if (input.jump) {
+      my += 1;
+    }
+    if (input.descend) {
+      my -= 1;
+    }
+
+    // 2. Normalize entire motion vector
+    // This is the key: (Forward + Right) length > 1, so we must normalize.
+    const mLen = Math.sqrt(mx * mx + my * my + mz * mz);
+    if (mLen > 0) {
+      mx /= mLen;
+      my /= mLen;
+      mz /= mLen;
+
+      // 3. Scale by Speed * dt
+      const moveStep = speed * dt;
+      mx *= moveStep;
+      my *= moveStep;
+      mz *= moveStep;
+
+      player.position.x += mx;
+      player.position.y += my;
+      player.position.z += mz;
+
+      player.velocity.x = mx / dt;
+      player.velocity.y = my / dt;
+      player.velocity.z = mz / dt;
+    } else {
+      player.velocity.x = 0;
+      player.velocity.y = 0;
+      player.velocity.z = 0;
+    }
+  }
+}
+
+const game = new GameServer();
+game.start();
+console.log('Game Server started');

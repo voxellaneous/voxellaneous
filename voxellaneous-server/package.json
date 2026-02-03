@@ -10,6 +10,7 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@geckos.io/server": "^3.0.2",
     "ws": "^8.16.0"
   },
   "devDependencies": {
