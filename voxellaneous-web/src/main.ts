@@ -130,23 +130,17 @@ async function initializeApp(): Promise<AppData> {
   }
   renderer.uploadScene(baseScene);
 
-  // Add test marker for depth buffer testing (red cube)
+  // Add test marker for depth buffer testing
+  // Uses palette index 1 (first existing color) to avoid modifying the palette
   const testMarkerSize = 8;
-  const testMarkerVoxels = createUniformVoxelData(testMarkerSize, 255);
+  const testMarkerVoxels = createUniformVoxelData(testMarkerSize, 1);
 
-  // Ensure palette has red at index 255
-  while (baseScene.palette.length < 256) {
-    baseScene.palette.push([0, 0, 0, 0]);
-  }
-  baseScene.palette[255] = [255, 0, 0, 255]; // Red
-
-  // Create test marker at a visible position
   const testMarker: VoxelObject = {
     id: 'test_marker',
     dims: vec3.fromValues(testMarkerSize, testMarkerSize, testMarkerSize),
     modelMatrix: (() => {
       const m = mat4.create();
-      mat4.translate(m, m, [-100, -470, -320]); // Center of sponza
+      mat4.translate(m, m, [-100, -470, -320]);
       mat4.scale(m, m, [testMarkerSize, testMarkerSize, testMarkerSize]);
       return m;
     })(),
