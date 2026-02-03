@@ -108,7 +108,7 @@ async function initializeApp(): Promise<AppData> {
     lightIntensity: 1.0,
     showBboxes: false,
   };
-  const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
+  const profilerData: ProfilerData = { fps: 0, frameTime: 0, pingMs: 0, lastTimeStamp: 0 };
 
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
@@ -224,6 +224,7 @@ async function initializeApp(): Promise<AppData> {
   const render: FrameRequestCallback = (time) => {
     autoresizeCanvas();
     updateProfilerData(profilerData, time);
+    profilerData.pingMs = network.getPingMs();
 
     // Client Side Prediction (Visual Only for now)
     // Profiler data frameTime is in ms, we need seconds

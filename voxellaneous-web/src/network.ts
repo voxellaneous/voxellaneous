@@ -27,6 +27,7 @@ export class NetworkClient {
   private lastSnapshotSeq: number | null = null;
   private isConnected = false;
   private serverTimeOffsetMs = 0;
+  private lastRttMs = 0;
   private timeOffsetSamples: number[] = [];
   private readonly timeOffsetWindow: number;
   private readonly maxRttMs: number;
@@ -80,6 +81,7 @@ export class NetworkClient {
         if (!data || typeof data.clientTime !== 'number' || typeof data.serverTime !== 'number') return;
         const now = Date.now();
         const rtt = now - data.clientTime;
+        this.lastRttMs = rtt;
         if (rtt > this.maxRttMs) return;
         const estimate = data.serverTime - (data.clientTime + rtt / 2);
         this.pushTimeOffsetSample(estimate);
@@ -290,6 +292,10 @@ export class NetworkClient {
   }
   public getMyId(): number | null {
     return this.myId;
+  }
+
+  public getPingMs(): number {
+    return this.lastRttMs;
   }
 
   private pushTimeOffsetSample(estimate: number) {

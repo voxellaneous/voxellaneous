@@ -68,4 +68,9 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     readonly: true,
     format: (v) => v.toFixed(2),
   });
+  performanceFolder.addBinding(profilerData, 'pingMs', {
+    label: 'Ping (ms)',
+    readonly: true,
+    format: (v) => Math.round(v).toString(),
+  });
 }

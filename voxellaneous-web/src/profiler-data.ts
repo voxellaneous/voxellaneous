@@ -1,6 +1,7 @@
 export type ProfilerData = {
   fps: number;
   frameTime: number;
+  pingMs: number;
   lastTimeStamp: number;
 };
 
