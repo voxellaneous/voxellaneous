@@ -4,6 +4,7 @@ import * as NoiseModule from 'noisejs';
 const Noise = (NoiseModule as any).Noise || NoiseModule;
 
 import { ChunkCoord, TerrainConfig, NoiseLayer } from './types';
+import { ByteArray } from '../common/types';
 
 type NoiseGenerator = InstanceType<typeof Noise>;
 
@@ -20,12 +21,7 @@ function createNoiseGenerators(baseSeed: number, layers: NoiseLayer[]): Map<numb
 }
 
 /** Sample a single noise layer with fractal octaves */
-function sampleNoiseLayer(
-  worldX: number,
-  worldZ: number,
-  layer: NoiseLayer,
-  noise: NoiseGenerator,
-): number {
+function sampleNoiseLayer(worldX: number, worldZ: number, layer: NoiseLayer, noise: NoiseGenerator): number {
   if (!layer.enabled) return 0;
 
   let amplitude = 1.0;
@@ -118,7 +114,7 @@ function generateChunkVoxels(
   generators: Map<number, NoiseGenerator>,
   grassPaletteIndex: number,
   lod: number,
-): Uint8Array {
+): ByteArray {
   const { chunkSize, worldScale } = config;
 
   const lodScale = Math.pow(2, lod);
@@ -178,7 +174,7 @@ export interface WorkerResultMessage {
   id: string;
   coord: ChunkCoord;
   lod: number;
-  voxels: Uint8Array | null; // null if chunk is empty/solid
+  voxels: ByteArray | null; // null if chunk is empty/solid
   lodChunkSize: number;
 }
 
@@ -215,13 +211,7 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       return;
     }
 
-    const voxels = generateChunkVoxels(
-      msg.coord,
-      currentConfig,
-      noiseGenerators,
-      msg.grassPaletteIndex,
-      msg.lod,
-    );
+    const voxels = generateChunkVoxels(msg.coord, currentConfig, noiseGenerators, msg.grassPaletteIndex, msg.lod);
 
     const response: WorkerResultMessage = {
       type: 'result',
@@ -233,6 +223,6 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
     };
 
     // Transfer the buffer for efficiency
-    self.postMessage(response, [voxels.buffer]);
+    self.postMessage(response, { transfer: [voxels.buffer as ArrayBuffer] });
   }
 };

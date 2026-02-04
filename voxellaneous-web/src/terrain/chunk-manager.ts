@@ -2,10 +2,8 @@ import { vec3, mat4 } from 'gl-matrix';
 import { VoxelObject } from '../scene';
 import { TERRAIN_PALETTE } from './chunk';
 import { Chunk, ChunkCoord, TerrainConfig, DEFAULT_TERRAIN_CONFIG, chunkKey } from './types';
-import type {
-  WorkerMessage,
-  WorkerResultMessage,
-} from './terrain-worker';
+import type { WorkerMessage, WorkerResultMessage } from './terrain-worker';
+import { ByteArray } from '../common/types';
 
 /** Create a unique key for a chunk at a specific LOD */
 function chunkLodKey(coord: ChunkCoord, lod: number): string {
@@ -34,10 +32,7 @@ export class ChunkManager {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config };
 
     // Create and initialize the worker
-    this.worker = new Worker(
-      new URL('./terrain-worker.ts', import.meta.url),
-      { type: 'module' }
-    );
+    this.worker = new Worker(new URL('./terrain-worker.ts', import.meta.url), { type: 'module' });
 
     this.worker.onmessage = this.handleWorkerMessage.bind(this);
 
@@ -72,16 +67,29 @@ export class ChunkManager {
 
       this.chunks.set(key, chunk);
       this.chunksChanged = true;
+
+      // Queue Y neighbors to discover terrain extent
+      this.queueYNeighbors(msg.coord, msg.lod);
     }
   }
 
+  private queueYNeighbors(coord: ChunkCoord, lod: number): void {
+    const neighbors = [
+      { ...coord, y: coord.y - 1 },
+      { ...coord, y: coord.y + 1 },
+    ];
 
-  private createVoxelObject(
-    coord: ChunkCoord,
-    voxels: Uint8Array,
-    lod: number,
-    lodChunkSize: number,
-  ): VoxelObject {
+    for (const neighborCoord of neighbors) {
+      const key = chunkLodKey(neighborCoord, lod);
+      const coordKey = `${neighborCoord.x},${neighborCoord.y},${neighborCoord.z},lod${lod}`;
+
+      if (!this.chunks.has(key) && !this.pendingChunks.has(key) && !this.nonSurfaceChunks.has(coordKey)) {
+        this.requestChunkGeneration(neighborCoord, lod);
+      }
+    }
+  }
+
+  private createVoxelObject(coord: ChunkCoord, voxels: ByteArray, lod: number, lodChunkSize: number): VoxelObject {
     const { worldScale } = this.config;
 
     // LOD increases world scale per chunk
@@ -287,7 +295,7 @@ export class ChunkManager {
           if (maxChunkDist > maxWorldDist) continue;
           if (lod > 0 && maxChunkDist < minWorldDist) continue;
 
-          // Y range based purely on terrain bounds (not player position)
+          // Y range - always include Y=0 to guarantee ground discovery
           const { baseTerrainHeight, heightScale } = this.config;
           const terrainMinY = baseTerrainHeight - heightScale;
           const terrainMaxY = baseTerrainHeight + heightScale;
@@ -322,7 +330,7 @@ export class ChunkManager {
     candidates.sort((a, b) => a.dist - b.dist);
 
     // If queue is full and we have LOD 0 candidates, clear distant higher-LOD pending
-    const lod0Candidates = candidates.filter(c => c.lod === 0);
+    const lod0Candidates = candidates.filter((c) => c.lod === 0);
     if (lod0Candidates.length > 0 && this.pendingChunks.size >= MAX_PENDING_REQUESTS) {
       // Clear higher-LOD pending to make room for LOD 0
       for (const key of this.pendingChunks) {
