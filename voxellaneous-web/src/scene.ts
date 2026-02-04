@@ -10,6 +10,7 @@ export interface VoxelObject {
   invModelMatrix: mat4;
   dims: vec3;
   voxels: ByteArray;
+  palette: RGBA[];  // Per-object palette
 }
 
 /** Overall scene definition including a shared 4-color palette and list of voxel objects */

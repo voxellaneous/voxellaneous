@@ -42,6 +42,14 @@ export class CameraModule {
     return this.camera.position;
   }
 
+  setSpeed(speed: number) {
+    this.camera.speed = speed;
+  }
+
+  get speed(): number {
+    return this.camera.speed;
+  }
+
   setDirection(direction: vec3) {
     this.camera.yaw = Math.atan2(direction[0], direction[2]);
     this.camera.pitch = Math.asin(direction[1]);

@@ -4,14 +4,19 @@ import './style.css';
 import { Renderer } from './renderer';
 import { initializeDevTools } from './editor';
 import { importFromBinary, createSceneFromResult } from './converter';
-import { Scene, VoxelObject } from './scene';
+import { Scene, VoxelObject, RGBA } from './scene';
 import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
 import { ByteArray } from './common/types';
+import { ChunkManager } from './terrain';
 
 const remoteMarkerSize = 4;
+const markerPalette: RGBA[] = [
+  [0, 0, 0, 0], // Index 0: empty
+  [255, 0, 0, 255], // Index 1: red marker
+];
 
 function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
   const total = size * size * size;
@@ -36,6 +41,7 @@ function createRemoteMarkerObject(
     modelMatrix,
     invModelMatrix: inverseModelMatrix,
     voxels,
+    palette: markerPalette,
   };
 }
 
@@ -59,6 +65,9 @@ export type AppData = {
   ambient: number;
   lightIntensity: number;
   showBboxes: boolean;
+  terrainManager?: ChunkManager;
+  cameraModule?: CameraModule;
+  cameraSpeed: number;
 };
 
 function createCanvasAutoresize({ renderer, canvas }: AppData): { autoresizeCanvas: VoidFunction } {
@@ -98,6 +107,10 @@ async function initializeApp(): Promise<AppData> {
   const network = new NetworkClient({ url: wsUrl, roomId });
 
   const renderer = await Renderer.new(canvas);
+  const cameraModule = new CameraModule(canvas);
+  cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
+  cameraModule.setPosition([-100, 80, -356]); // Above terrain level
+
   const app: AppData = {
     renderer,
     canvas,
@@ -106,55 +119,54 @@ async function initializeApp(): Promise<AppData> {
     ambient: 0.3,
     lightIntensity: 1.0,
     showBboxes: false,
+    cameraModule,
+    cameraSpeed: cameraModule.speed,
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
-
-  const cameraModule = new CameraModule(canvas);
-  cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
-  cameraModule.setPosition([-100, -470, -356]);
 
   const { autoresizeCanvas } = createCanvasAutoresize(app);
 
   // Load sponza scene
-  let baseScene: Scene = { palette: [], objects: [] };
+  let sponzaObjects: VoxelObject[] = [];
   try {
     const response = await fetch('/resources/sponza.voxgz');
     if (response.ok) {
       const blob = await response.blob();
       const file = new File([blob], 'sponza.voxgz');
       const result = await importFromBinary(file);
-      baseScene = createSceneFromResult(result);
+      const sponzaScene = createSceneFromResult(result);
+      // Attach sponza palette and offset Y position
+      const sponzaYOffset = 510; // Move sponza down to terrain level
+      sponzaObjects = sponzaScene.objects.map((obj) => {
+        const offsetMatrix = mat4.clone(obj.modelMatrix);
+        offsetMatrix[13] += sponzaYOffset; // Add to Y translation
+        const invOffsetMatrix = mat4.invert(mat4.create(), offsetMatrix)!;
+        return {
+          ...obj,
+          modelMatrix: offsetMatrix,
+          invModelMatrix: invOffsetMatrix,
+          palette: sponzaScene.palette,
+        };
+      });
     }
   } catch (e) {
     console.warn('Failed to load sponza:', e);
   }
-  renderer.uploadScene(baseScene);
 
-  // Add test marker for depth buffer testing
-  // Uses palette index 1 (first existing color) to avoid modifying the palette
-  const testMarkerSize = 8;
-  const testMarkerVoxels = createUniformVoxelData(testMarkerSize, 1);
+  // Initialize terrain manager with LOD levels
+  // Uses DEFAULT_TERRAIN_CONFIG for noise layers and other defaults
+  const terrainManager = new ChunkManager();
+  app.terrainManager = terrainManager;
 
-  const testMarker: VoxelObject = {
-    id: 'test_marker',
-    dims: vec3.fromValues(testMarkerSize, testMarkerSize, testMarkerSize),
-    modelMatrix: (() => {
-      const m = mat4.create();
-      mat4.translate(m, m, [-100, -470, -320]);
-      mat4.scale(m, m, [testMarkerSize, testMarkerSize, testMarkerSize]);
-      return m;
-    })(),
-    invModelMatrix: (() => {
-      const m = mat4.create();
-      mat4.translate(m, m, [-100, -470, -320]);
-      mat4.scale(m, m, [testMarkerSize, testMarkerSize, testMarkerSize]);
-      return mat4.invert(mat4.create(), m)!;
-    })(),
-    voxels: testMarkerVoxels,
-  };
+  // Upload sponza once as static objects
+  renderer.uploadStaticObjects(sponzaObjects, []);
 
-  baseScene.objects.push(testMarker);
-  renderer.uploadScene(baseScene);
+  // Initial terrain load (dynamic)
+  terrainManager.update(cameraModule.position);
+  renderer.uploadScene({
+    palette: [],
+    objects: terrainManager.getVisibleChunks(),
+  });
 
   const markerVoxels = createUniformVoxelData(remoteMarkerSize, 0);
 
@@ -168,11 +180,11 @@ async function initializeApp(): Promise<AppData> {
     const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
       createRemoteMarkerObject(player.id, player.position, markerVoxels),
     );
-    const scene: Scene = {
-      palette: baseScene.palette,
-      objects: [...baseScene.objects, ...remoteObjects],
-    };
-    renderer.uploadScene(scene);
+    const terrainChunks = app.terrainManager!.getVisibleChunks();
+    renderer.uploadScene({
+      palette: [],
+      objects: [...terrainChunks, ...remoteObjects],
+    });
   };
 
   const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
@@ -190,6 +202,21 @@ async function initializeApp(): Promise<AppData> {
       { x: cameraModule.position[0], y: cameraModule.position[1], z: cameraModule.position[2] },
       { x: cameraModule.direction[0], y: cameraModule.direction[1], z: cameraModule.direction[2] },
     );
+
+    // Update terrain chunks based on camera position
+    const terrainChanged = app.terrainManager!.update(cameraModule.position);
+    if (terrainChanged) {
+      const terrainChunks = app.terrainManager!.getVisibleChunks();
+      const remotePlayers = network.getRemotePlayers();
+      const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
+        createRemoteMarkerObject(player.id, player.position, markerVoxels),
+      );
+      renderer.uploadScene({
+        palette: [],
+        objects: [...terrainChunks, ...remoteObjects],
+      });
+    }
+
     const mvpMatrix = cameraModule.calculateMVP();
 
     const lightDirArray = new Float32Array([app.lightDir.x, app.lightDir.y, app.lightDir.z]);

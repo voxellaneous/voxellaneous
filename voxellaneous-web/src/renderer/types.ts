@@ -69,6 +69,6 @@ export interface GPUAdapterInfo {
 export const UNIFORM_SIZES = {
   PER_FRAME: 80,
   STATIC: 1024,
-  PER_DRAW: 128,
+  PER_DRAW: 1152,  // 128 (matrices) + 1024 (palette)
   LIGHTING: 32,
 } as const;

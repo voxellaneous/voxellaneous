@@ -3,7 +3,7 @@
  * Ported from Rust/wgpu to TypeScript/WebGPU
  */
 
-import { DrawCallData, Scene, UNIFORM_SIZES } from './types';
+import { DrawCallData, Scene, UNIFORM_SIZES, RGBA, SceneObject as VoxelObject } from './types';
 import { CUBE_VERTICES, CUBE_INDICES, CUBE_EDGE_INDICES, VERTEX_STRIDE } from './constants';
 import { packRGBATuple } from './utils';
 
@@ -62,7 +62,9 @@ export class Renderer {
   private sampler: GPUSampler;
 
   // Draw call data
-  private drawCallArray: DrawCallData[] = [];
+  private staticDrawCalls: DrawCallData[] = [];
+  private dynamicDrawCalls: DrawCallData[] = [];
+  private dynamicDrawCallCache: Map<string, DrawCallData> = new Map();
 
   private constructor(
     device: GPUDevice,
@@ -272,10 +274,10 @@ export class Renderer {
       ],
     });
 
-    // Create main render pipeline
+    // Create main render pipeline (no static bind group - palette is in per-draw)
     const pipelineLayout = device.createPipelineLayout({
       label: 'Pipeline Layout',
-      bindGroupLayouts: [staticBindGroupLayout, perFrameBindGroupLayout, perDrawBindGroupLayout],
+      bindGroupLayouts: [perFrameBindGroupLayout, perDrawBindGroupLayout],
     });
 
     const renderPipeline = device.createRenderPipeline({
@@ -609,13 +611,16 @@ export class Renderer {
       });
 
       pass.setPipeline(this.renderPipeline);
-      pass.setBindGroup(0, this.staticBindGroup);
-      pass.setBindGroup(1, perFrameBindGroup);
+      pass.setBindGroup(0, perFrameBindGroup);
       pass.setVertexBuffer(0, this.vertexBuffer);
       pass.setIndexBuffer(this.indexBuffer, 'uint16');
 
-      for (const dc of this.drawCallArray) {
-        pass.setBindGroup(2, dc.bindGroup);
+      for (const dc of this.staticDrawCalls) {
+        pass.setBindGroup(1, dc.bindGroup);
+        pass.drawIndexed(CUBE_INDICES.length);
+      }
+      for (const dc of this.dynamicDrawCalls) {
+        pass.setBindGroup(1, dc.bindGroup);
         pass.drawIndexed(CUBE_INDICES.length);
       }
 
@@ -720,7 +725,8 @@ export class Renderer {
       pass.setVertexBuffer(0, this.vertexBuffer);
       pass.setIndexBuffer(this.edgeIndexBuffer, 'uint16');
 
-      for (const dc of this.drawCallArray) {
+      const allDrawCalls = [...this.staticDrawCalls, ...this.dynamicDrawCalls];
+      for (const dc of allDrawCalls) {
         const wireframeBg = this.device.createBindGroup({
           label: 'Wireframe BG',
           layout: this.wireframeBindGroupLayout,
@@ -754,21 +760,26 @@ export class Renderer {
   }
 
   uploadScene(scene: Scene): void {
-    // Step 1: Upload the color palette as a uniform buffer
-    const colorPalette = new Uint32Array(256);
-    for (let i = 0; i < scene.palette.length && i < 256; i++) {
-      colorPalette[i] = packRGBATuple(scene.palette[i]);
+    const currentIds = new Set(scene.objects.map((o) => o.id));
+    const cachedIds = new Set(this.dynamicDrawCallCache.keys());
+
+    // Remove draw calls for objects no longer in scene
+    for (const id of cachedIds) {
+      if (!currentIds.has(id)) {
+        const dc = this.dynamicDrawCallCache.get(id)!;
+        dc.texture.destroy();
+        dc.uniformBuffer.destroy();
+        this.dynamicDrawCallCache.delete(id);
+      }
     }
-    this.queue.writeBuffer(this.staticUniformBuffer, 0, colorPalette);
 
-    // Step 2: Upload objects as 3D textures
-    const drawCallArray: DrawCallData[] = [];
-
+    // Add draw calls for new objects
     for (const obj of scene.objects) {
+      if (this.dynamicDrawCallCache.has(obj.id)) continue;
+
       const dims = Array.isArray(obj.dims) ? obj.dims : [obj.dims[0], obj.dims[1], obj.dims[2]];
       const [nx, ny, nz] = dims;
 
-      // Create the 3D texture
       const texture = this.device.createTexture({
         label: `object_${obj.id}`,
         size: { width: nx, height: ny, depthOrArrayLayers: nz },
@@ -779,7 +790,6 @@ export class Renderer {
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
 
-      // Upload the voxel data
       this.queue.writeTexture(
         { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
         new Uint8Array(obj.voxels),
@@ -790,22 +800,96 @@ export class Renderer {
       const textureView = texture.createView();
       const sampler = this.device.createSampler({});
 
-      // Create per-draw uniform buffer
       const uniformBuffer = this.device.createBuffer({
         label: 'Per Draw Uniform Buffer',
         size: UNIFORM_SIZES.PER_DRAW,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
 
-      // Write model matrices to uniform buffer
       const uniformData = new Float32Array(32);
       uniformData.set(obj.modelMatrix, 0);
       uniformData.set(obj.invModelMatrix, 16);
       this.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
-      // Create bind group
+      const colorPalette = new Uint32Array(256);
+      const palette = obj.palette || scene.palette;
+      for (let i = 0; i < palette.length && i < 256; i++) {
+        colorPalette[i] = packRGBATuple(palette[i]);
+      }
+      this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+
       const bindGroup = this.device.createBindGroup({
         label: 'Per Draw Call Bind Group',
+        layout: this.perDrawBindGroupLayout,
+        entries: [
+          { binding: 0, resource: textureView },
+          { binding: 1, resource: { buffer: uniformBuffer } },
+        ],
+      });
+
+      this.dynamicDrawCallCache.set(obj.id, {
+        bindGroup,
+        texture,
+        textureView,
+        sampler,
+        uniformBuffer,
+      });
+    }
+
+    // Build draw call array in scene order
+    this.dynamicDrawCalls = scene.objects
+      .map((obj) => this.dynamicDrawCallCache.get(obj.id)!)
+      .filter(Boolean);
+  }
+
+  /** Upload static objects (only call once, these won't be re-uploaded) */
+  uploadStaticObjects(objects: VoxelObject[], defaultPalette: RGBA[]): void {
+    const drawCallArray: DrawCallData[] = [];
+
+    for (const obj of objects) {
+      const dims = Array.isArray(obj.dims) ? obj.dims : [obj.dims[0], obj.dims[1], obj.dims[2]];
+      const [nx, ny, nz] = dims;
+
+      const texture = this.device.createTexture({
+        label: `static_${obj.id}`,
+        size: { width: nx, height: ny, depthOrArrayLayers: nz },
+        mipLevelCount: 1,
+        sampleCount: 1,
+        dimension: '3d',
+        format: 'r8uint',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+
+      this.queue.writeTexture(
+        { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+        new Uint8Array(obj.voxels),
+        { offset: 0, bytesPerRow: nx, rowsPerImage: ny },
+        { width: nx, height: ny, depthOrArrayLayers: nz },
+      );
+
+      const textureView = texture.createView();
+      const sampler = this.device.createSampler({});
+
+      const uniformBuffer = this.device.createBuffer({
+        label: 'Static Uniform Buffer',
+        size: UNIFORM_SIZES.PER_DRAW,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      const uniformData = new Float32Array(32);
+      uniformData.set(obj.modelMatrix, 0);
+      uniformData.set(obj.invModelMatrix, 16);
+      this.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+      const colorPalette = new Uint32Array(256);
+      const palette = obj.palette || defaultPalette;
+      for (let i = 0; i < palette.length && i < 256; i++) {
+        colorPalette[i] = packRGBATuple(palette[i]);
+      }
+      this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+
+      const bindGroup = this.device.createBindGroup({
+        label: 'Static Bind Group',
         layout: this.perDrawBindGroupLayout,
         entries: [
           { binding: 0, resource: textureView },
@@ -822,7 +906,7 @@ export class Renderer {
       });
     }
 
-    this.drawCallArray = drawCallArray;
+    this.staticDrawCalls = drawCallArray;
   }
 }
 
