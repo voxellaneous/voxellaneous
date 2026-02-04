@@ -27,11 +27,12 @@ struct PerDrawUniforms {
 
 @group(2) @binding(0) var voxel_texture: texture_3d<u32>;
 
-// G‑buffer outputs: albedo, normal, linear depth
+// G‑buffer outputs: albedo, normal, linear depth, and explicit fragment depth
 struct GBuffer {
     @location(0) albedo:    vec4<f32>, // Rgba8Unorm
     @location(1) normal:    vec4<f32>, // Rgba8Unorm encoded
     @location(2) linear_z:  u32,       // R16Uint
+    @builtin(frag_depth) depth: f32,   // Correct depth for raymarched hit point
 };
 
 @vertex
@@ -136,16 +137,31 @@ fn fs_main(in: VertexOutput) -> GBuffer {
         discard;
     }
 
-    let hit_pos_os = cam_os + hit_t * dir_os;
+    // Compute hit position from voxel coordinates (hit_t was in voxel-space units, not object-space!)
+    // Convert hit_voxel [0, dims) to object space [-0.5, 0.5]
+    // hit_voxel is the voxel that was hit, hit_normal points outward from that voxel
+    // Surface hit point = voxel center + 0.5 * voxel_size in normal direction
+    let voxel_size = 1.0 / dims_f;
+    let voxel_center_os = (vec3<f32>(hit_voxel) + 0.5) * voxel_size - vec3<f32>(0.5);
+    let hit_pos_os = voxel_center_os - hit_normal * 0.5 * voxel_size;
     let hit_pos_ws = (u_draw.model_matrix * vec4<f32>(hit_pos_os, 1.0)).xyz;
 
     let packed = u_static.palette[hit_idx / 4u][hit_idx % 4u];
     let albedo = unpack4x8unorm(packed);
 
     let linear_z = length(hit_pos_ws - u_frame.cam_pos_ws);
+
+    // Compute correct fragment depth from hit position in world space
+    // Transform hit_pos_ws to clip space using VP matrix
+    let hit_clip = u_frame.vp_matrix * vec4<f32>(hit_pos_ws, 1.0);
+    // Reverse-Z: projection matrix already swaps near/far, so near objects get ~1.0, far ~0.0
+    // Just do perspective divide, matrix handles the inversion
+    let frag_depth = clamp(hit_clip.z / hit_clip.w, 0.0, 1.0);
+
     return GBuffer(
         albedo,
         vec4<f32>(hit_normal * 0.5 + 0.5, 1.0),
-        u32(clamp(linear_z / 100.0, 0.0, 1.0) * 65535.0)
+        u32(clamp(linear_z / 100.0, 0.0, 1.0) * 65535.0),
+        frag_depth
     );
 }
