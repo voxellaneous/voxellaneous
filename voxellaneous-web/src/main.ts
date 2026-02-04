@@ -134,20 +134,20 @@ async function initializeApp(): Promise<AppData> {
   }
   renderer.uploadScene(baseScene);
 
-  // Force index 255 to be RED
-  // Force index 255 to be RED
+  // Reserve index 254 for player markers (black color)
+  // Using 254 to avoid overwriting colors that might be used by the scene
   // Scene palette is RGBA[] (tuples of numbers), NOT flat Uint32Array
-  if (baseScene.palette.length <= 255) {
-    const missing = 256 - baseScene.palette.length;
+  if (baseScene.palette.length <= 254) {
+    const missing = 255 - baseScene.palette.length;
     for (let i = 0; i < missing; i++) {
       baseScene.palette.push([0, 0, 0, 0]);
     }
   }
 
-  // Set index 255 to Red [255, 0, 0, 255]
-  baseScene.palette[255] = [255, 0, 0, 255];
+  // Set index 254 to Black [0, 0, 0, 255] for player markers
+  baseScene.palette[254] = [0, 0, 0, 255];
 
-  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 255);
+  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 254);
 
   // Tracking known players to avoid re-uploading scene
   const knownRemotePlayers = new Set<string>();
