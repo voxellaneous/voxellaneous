@@ -101,8 +101,11 @@ function getChunkTerrainType(
   maxHeight += lodHeightOffset;
   minHeight += lodHeightOffset;
 
+  const voxelSize = lodWorldScale / config.chunkSize;
+
   if (chunkMinY >= maxHeight) return 'empty';
-  if (chunkMaxY <= minHeight) return 'solid';
+  // Only solid if min terrain is at least one voxel above chunk top
+  if (chunkMaxY + voxelSize <= minHeight) return 'solid';
 
   return 'surface';
 }

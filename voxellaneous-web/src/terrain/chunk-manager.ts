@@ -3,7 +3,6 @@ import { VoxelObject } from '../scene';
 import { TERRAIN_PALETTE } from './chunk';
 import { Chunk, ChunkCoord, TerrainConfig, DEFAULT_TERRAIN_CONFIG, chunkKey } from './types';
 import type { WorkerMessage, WorkerResultMessage } from './terrain-worker';
-import { ByteArray } from '../common/types';
 
 /** Create a unique key for a chunk at a specific LOD */
 function chunkLodKey(coord: ChunkCoord, lod: number): string {
@@ -75,8 +74,8 @@ export class ChunkManager {
 
   private queueYNeighbors(coord: ChunkCoord, lod: number): void {
     const neighbors = [
-      { ...coord, y: coord.y - 1 },
-      { ...coord, y: coord.y + 1 },
+      { ...coord, y: coord.y - 2 },
+      { ...coord, y: coord.y + 2 },
     ];
 
     for (const neighborCoord of neighbors) {
@@ -89,7 +88,7 @@ export class ChunkManager {
     }
   }
 
-  private createVoxelObject(coord: ChunkCoord, voxels: ByteArray, lod: number, lodChunkSize: number): VoxelObject {
+  private createVoxelObject(coord: ChunkCoord, voxels: Uint8Array, lod: number, lodChunkSize: number): VoxelObject {
     const { worldScale } = this.config;
 
     // LOD increases world scale per chunk
@@ -295,10 +294,10 @@ export class ChunkManager {
           if (maxChunkDist > maxWorldDist) continue;
           if (lod > 0 && maxChunkDist < minWorldDist) continue;
 
-          // Y range - always include Y=0 to guarantee ground discovery
+          // Y range - extend lower bound more to catch deep valleys
           const { baseTerrainHeight, heightScale } = this.config;
-          const terrainMinY = baseTerrainHeight - heightScale;
-          const terrainMaxY = baseTerrainHeight + heightScale;
+          const terrainMinY = baseTerrainHeight - heightScale * 2;
+          const terrainMaxY = baseTerrainHeight + heightScale * 2;
 
           // Convert to this LOD's chunk coordinates
           const yMin = Math.floor(terrainMinY / lodWorldScale) - 1;
