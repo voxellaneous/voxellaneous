@@ -3,3 +3,7 @@ node_modules/
 
 GEMINI.md
 tmp/
+
+# Rust build artifacts
+**/target/
+Cargo.lock
