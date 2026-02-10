@@ -6,7 +6,7 @@ import {
   encodeUserCmdPacket,
   decodeNetMessage,
   NetPacketType,
-} from './common/types';
+} from '../../voxellaneous-common/src/netcode';
 
 type NetworkOptions = {
   url: string;

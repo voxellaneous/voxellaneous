@@ -9,7 +9,7 @@ import {
   encodeWorldSnapshot,
   encodeWorldDelta,
   SnapshotDelta,
-} from './types';
+} from '../voxellaneous-common/src/netcode';
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
 const PLAYER_TIMEOUT_MS = Number.parseInt(process.env.PLAYER_TIMEOUT_MS || '300000', 10); // 5 minutes default

@@ -4,7 +4,7 @@ import { voxelizeMeshes } from './voxelizer';
 import { mapColorsToPalette } from './palette-mapper';
 import { ConversionResult, VoxelizationConfig } from './types';
 import { VoxelObject, Scene } from '../scene';
-import { ByteArray } from '../common/types';
+import { ByteArray } from '../../../voxellaneous-common/src/byte-array';
 
 export type { VoxelizationConfig, ConversionResult } from './types';
 

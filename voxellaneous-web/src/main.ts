@@ -1,4 +1,5 @@
 import { CameraModule } from './camera';
+import { LocalPlayer } from './local-player';
 import './style.css';
 
 import { Renderer } from './renderer';
@@ -9,7 +10,7 @@ import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
-import { ByteArray } from './common/types';
+import { ByteArray } from '../../voxellaneous-common/src/byte-array';
 
 const remoteMarkerSize = 4;
 
@@ -100,7 +101,9 @@ async function initializeApp(): Promise<AppData> {
 
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
-  cameraModule.setPosition([-100, -470, -356]);
+
+  const player = new LocalPlayer([-100, -470, -356]);
+  cameraModule.setPosition(player.position as vec3);
 
   const { autoresizeCanvas } = createCanvasAutoresize(app);
 
@@ -190,10 +193,12 @@ async function initializeApp(): Promise<AppData> {
     profilerData.pingMs = network.getPingMs();
 
     const dt = profilerData.frameTime / 1000;
-    cameraModule.update(dt);
+    cameraModule.update();
 
     if (cameraModule.isFocused()) {
       const cmd = cameraModule.getUserCmd();
+      player.applyUserCmd(cmd, dt);
+      cameraModule.setPosition(player.position as vec3);
       network.sendInput(cmd, dt);
     }
 
@@ -204,11 +209,11 @@ async function initializeApp(): Promise<AppData> {
       lastReconciledSeq = snapshotSeq;
       const pending = network.getPendingInputs();
       const { x: sx, y: sy, z: sz } = serverState.position;
-      const [cx, cy, cz] = cameraModule.position;
+      const [px, py, pz] = player.position;
 
-      const dx = sx - cx;
-      const dy = sy - cy;
-      const dz = sz - cz;
+      const dx = sx - px;
+      const dy = sy - py;
+      const dz = sz - pz;
       const distSq = dx * dx + dy * dy + dz * dz;
 
       const SNAP_THRESHOLD = 5.0;
@@ -216,19 +221,20 @@ async function initializeApp(): Promise<AppData> {
       const LERP_FACTOR = 0.1;
 
       if (pending.length > 0) {
-        cameraModule.setPosition([sx, sy, sz]);
+        player.setPosition([sx, sy, sz]);
         for (const input of pending) {
-          cameraModule.applyUserCmd(input.cmd, input.dt);
+          player.applyUserCmd(input.cmd, input.dt);
         }
       } else if (distSq > SNAP_THRESHOLD * SNAP_THRESHOLD) {
         console.warn('Reconciliation hard snap!', distSq);
-        cameraModule.setPosition([sx, sy, sz]);
+        player.setPosition([sx, sy, sz]);
       } else if (distSq > CORRECTION_THRESHOLD * CORRECTION_THRESHOLD) {
-        const nx = cx + (sx - cx) * LERP_FACTOR;
-        const ny = cy + (sy - cy) * LERP_FACTOR;
-        const nz = cz + (sz - cz) * LERP_FACTOR;
-        cameraModule.setPosition([nx, ny, nz]);
+        const nx = px + (sx - px) * LERP_FACTOR;
+        const ny = py + (sy - py) * LERP_FACTOR;
+        const nz = pz + (sz - pz) * LERP_FACTOR;
+        player.setPosition([nx, ny, nz]);
       }
+      cameraModule.setPosition(player.position as vec3);
     }
 
     const mvpMatrix = cameraModule.calculateMVP();

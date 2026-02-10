@@ -1,5 +1,5 @@
 import { mat4, vec3 } from 'gl-matrix';
-import { ByteArray } from './common/types';
+import { ByteArray } from '../../voxellaneous-common/src/byte-array';
 
 /** RGBA color as [r, g, b, a] with values in 0..255 */
 export type RGBA = [number, number, number, number];
