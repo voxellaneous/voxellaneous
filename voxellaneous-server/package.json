@@ -11,6 +11,7 @@
     "bots": "tsx scripts/bot-clients.ts"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.0.0",
     "@geckos.io/server": "^3.0.2",
     "@geckos.io/client": "^3.0.2",
     "ws": "^8.16.0"

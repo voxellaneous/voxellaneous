@@ -65,7 +65,10 @@ export class CameraModule {
 
     const aspectRatio = this.canvas.width / this.canvas.height;
     const projectionMatrix = mat4.create();
-    mat4.perspective(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, 0.01, 10000.0);
+    // Reverse-Z: swap near/far for better depth precision at distance
+    const near = 0.1;
+    const far = 10000.0;
+    mat4.perspectiveZO(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, far, near);
 
     const mvpMatrix = mat4.create();
     mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
@@ -125,12 +128,11 @@ export class CameraModule {
     if (vec3.length(motion) === 0) return;
 
     vec3.normalize(motion, motion);
-    // Speed is units per second now
     vec3.scale(motion, motion, this.camera.speed * dt);
     vec3.add(this.camera.position, this.camera.position, motion);
   }
 
-  getUserCmd(): import('./common/types').UserCmd {
+  getUserCmd(): UserCmd {
     const dir = this.camera.direction;
     return {
       forward: !!this.keysPressedState['KeyW'],
@@ -150,46 +152,14 @@ export class CameraModule {
     this.updateCameraPosition(dt);
   }
 
-  get direction(): vec3 {
-    return this.camera.direction;
-  }
-
-  isFocused(): boolean {
-    return document.pointerLockElement === this.canvas;
-  }
-
-  calculateMVP(): mat4 {
-    const viewMatrix = mat4.create();
-    const cameraTarget: vec3 = [0, 0, 0];
-    vec3.add(cameraTarget, this.camera.position, this.camera.direction);
-    mat4.lookAt(viewMatrix, this.camera.position, cameraTarget, this.camera.up);
-
-    const aspectRatio = this.canvas.width / this.canvas.height;
-    const projectionMatrix = mat4.create();
-    // Reverse-Z: swap near/far for better depth precision at distance
-    // Near objects get depth ~1.0, far objects get depth ~0.0
-    const near = 0.1;
-    const far = 10000.0;
-    mat4.perspectiveZO(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, far, near);
-
-    const mvpMatrix = mat4.create();
-    mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
-
-    return mvpMatrix;
-  }
-
-  private handleMouseMove = (event: MouseEvent) => {
-    if (!this.isFocused()) return;
-
-    const dx = event.movementX;
-    const dy = event.movementY;
-
-    this.camera.yaw -= dx * mouseSensitivity;
-    this.camera.pitch -= dy * mouseSensitivity;
-
-    if (this.camera.pitch > maxCameraPitch) this.camera.pitch = maxCameraPitch;
-    if (this.camera.pitch < -maxCameraPitch) this.camera.pitch = -maxCameraPitch;
-  };
+  applyUserCmd(cmd: UserCmd, dt: number) {
+    const dir = vec3.fromValues(cmd.viewDir.x, cmd.viewDir.y, cmd.viewDir.z);
+    if (vec3.length(dir) > 0) {
+      vec3.normalize(dir, dir);
+      vec3.copy(this.camera.direction, dir);
+      vec3.cross(this.camera.right, this.camera.direction, this.camera.up);
+      vec3.normalize(this.camera.right, this.camera.right);
+    }
 
     let mx = 0;
     let my = 0;

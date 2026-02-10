@@ -1,0 +1,16 @@
+{
+    "name": "voxellaneous-common",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "generate": "npx buf generate proto"
+    },
+    "dependencies": {
+        "@bufbuild/protobuf": "^2.0.0"
+    },
+    "devDependencies": {
+        "@bufbuild/buf": "^1.47.0",
+        "@bufbuild/protoc-gen-es": "^2.0.0",
+        "typescript": "^5.5.4"
+    }
+}

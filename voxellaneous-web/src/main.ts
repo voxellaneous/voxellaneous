@@ -21,7 +21,7 @@ function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
 }
 
 function createRemoteMarkerObject(
-  id: string,
+  id: number,
   position: { x: number; y: number; z: number },
   voxels: ByteArray,
 ): VoxelObject {
@@ -37,18 +37,6 @@ function createRemoteMarkerObject(
     invModelMatrix: inverseModelMatrix,
     voxels,
   };
-}
-
-function buildRemoteSignature(
-  remotePlayers: Map<string, { id: string; position: { x: number; y: number; z: number } }>,
-) {
-  const entries = Array.from(remotePlayers.values())
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .map((player) => {
-      const { x, y, z } = player.position;
-      return `${player.id}:${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
-    });
-  return entries.join('|');
 }
 
 export type AppData = {
@@ -90,12 +78,13 @@ function registerRecurringAnimation(f: FrameRequestCallback): void {
   requestAnimationFrame(loop);
 }
 
+// function setupInputListeners() { ... } removed - using CameraModule directly
+
 async function initializeApp(): Promise<AppData> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 
-  const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:8080`;
-  const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
-  const network = new NetworkClient({ url: wsUrl, roomId });
+  // Use port 8080 for Geckos server (handled in NetworkClient default or passed explicitly)
+  const network = new NetworkClient({ url: `http://${window.location.hostname}` });
 
   const renderer = await Renderer.new(canvas);
   const app: AppData = {
@@ -107,7 +96,7 @@ async function initializeApp(): Promise<AppData> {
     lightIntensity: 1.0,
     showBboxes: false,
   };
-  const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
+  const profilerData: ProfilerData = { fps: 0, frameTime: 0, pingMs: 0, lastTimeStamp: 0 };
 
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
@@ -130,68 +119,119 @@ async function initializeApp(): Promise<AppData> {
   }
   renderer.uploadScene(baseScene);
 
-  // Add test marker for depth buffer testing
-  // Uses palette index 1 (first existing color) to avoid modifying the palette
-  const testMarkerSize = 8;
-  const testMarkerVoxels = createUniformVoxelData(testMarkerSize, 1);
+  // Reserve index 254 for player markers (black color)
+  if (baseScene.palette.length <= 254) {
+    const missing = 255 - baseScene.palette.length;
+    for (let i = 0; i < missing; i++) {
+      baseScene.palette.push([0, 0, 0, 0]);
+    }
+  }
+  baseScene.palette[254] = [0, 0, 0, 255];
 
-  const testMarker: VoxelObject = {
-    id: 'test_marker',
-    dims: vec3.fromValues(testMarkerSize, testMarkerSize, testMarkerSize),
-    modelMatrix: (() => {
-      const m = mat4.create();
-      mat4.translate(m, m, [-100, -470, -320]);
-      mat4.scale(m, m, [testMarkerSize, testMarkerSize, testMarkerSize]);
-      return m;
-    })(),
-    invModelMatrix: (() => {
-      const m = mat4.create();
-      mat4.translate(m, m, [-100, -470, -320]);
-      mat4.scale(m, m, [testMarkerSize, testMarkerSize, testMarkerSize]);
-      return mat4.invert(mat4.create(), m)!;
-    })(),
-    voxels: testMarkerVoxels,
-  };
+  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 254);
 
-  baseScene.objects.push(testMarker);
-  renderer.uploadScene(baseScene);
+  // Tracking known players to avoid re-uploading scene
+  const knownRemotePlayers = new Set<string>();
 
-  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 0);
-
-  let lastRemoteSignature = '';
   const updateRemoteScene = () => {
-    const remotePlayers = network.getRemotePlayers();
-    const signature = buildRemoteSignature(remotePlayers);
-    if (signature === lastRemoteSignature) return;
-    lastRemoteSignature = signature;
+    const remoteEntities = network.getRemoteEntities();
+    const currentIds = new Set(remoteEntities.map(e => `remote_${e.id}`));
 
-    const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
-      createRemoteMarkerObject(player.id, player.position, markerVoxels),
-    );
-    const scene: Scene = {
-      palette: baseScene.palette,
-      objects: [...baseScene.objects, ...remoteObjects],
-    };
-    renderer.uploadScene(scene);
+    let structureChanged = false;
+    for (const id of currentIds) {
+      if (!knownRemotePlayers.has(id)) {
+        structureChanged = true;
+        break;
+      }
+    }
+    if (!structureChanged && knownRemotePlayers.size !== currentIds.size) {
+      structureChanged = true;
+    }
+
+    if (structureChanged) {
+      console.log('Structure changed, re-uploading scene');
+      knownRemotePlayers.clear();
+      currentIds.forEach(id => knownRemotePlayers.add(id));
+
+      const remoteObjects = remoteEntities.map((entity) =>
+        createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
+      );
+
+      const scene: Scene = {
+        palette: baseScene.palette,
+        objects: [...baseScene.objects, ...remoteObjects],
+      };
+      renderer.uploadScene(scene);
+    } else {
+      for (const entity of remoteEntities) {
+        const id = `remote_${entity.id}`;
+        const obj = createRemoteMarkerObject(entity.id, entity.position, markerVoxels);
+
+        const uniformData = new Float32Array(32);
+        uniformData.set(obj.modelMatrix, 0);
+        uniformData.set(obj.invModelMatrix, 16);
+
+        renderer.updateObjectTransform(id, uniformData);
+      }
+    }
   };
 
-  const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
+  const remoteSceneInterval = window.setInterval(updateRemoteScene, 20);
   window.addEventListener('beforeunload', () => {
     window.clearInterval(remoteSceneInterval);
   });
 
-  // NOW start render loop after scene is uploaded
+  let lastReconciledSeq: number | null = null;
+
+  // RENDER LOOP
   const render: FrameRequestCallback = (time) => {
     autoresizeCanvas();
     updateProfilerData(profilerData, time);
+    profilerData.pingMs = network.getPingMs();
 
-    cameraModule.update();
-    network.setLocalState(
-      { x: cameraModule.position[0], y: cameraModule.position[1], z: cameraModule.position[2] },
-      { x: cameraModule.direction[0], y: cameraModule.direction[1], z: cameraModule.direction[2] },
-    );
+    const dt = profilerData.frameTime / 1000;
+    cameraModule.update(dt);
+
+    if (cameraModule.isFocused()) {
+      const cmd = cameraModule.getUserCmd();
+      network.sendInput(cmd, dt);
+    }
+
+    // Server Reconciliation
+    const serverState = network.getMyLatestState();
+    const snapshotSeq = network.getLatestSnapshotSequence();
+    if (serverState && snapshotSeq !== null && snapshotSeq !== lastReconciledSeq) {
+      lastReconciledSeq = snapshotSeq;
+      const pending = network.getPendingInputs();
+      const { x: sx, y: sy, z: sz } = serverState.position;
+      const [cx, cy, cz] = cameraModule.position;
+
+      const dx = sx - cx;
+      const dy = sy - cy;
+      const dz = sz - cz;
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      const SNAP_THRESHOLD = 5.0;
+      const CORRECTION_THRESHOLD = 0.5;
+      const LERP_FACTOR = 0.1;
+
+      if (pending.length > 0) {
+        cameraModule.setPosition([sx, sy, sz]);
+        for (const input of pending) {
+          cameraModule.applyUserCmd(input.cmd, input.dt);
+        }
+      } else if (distSq > SNAP_THRESHOLD * SNAP_THRESHOLD) {
+        console.warn('Reconciliation hard snap!', distSq);
+        cameraModule.setPosition([sx, sy, sz]);
+      } else if (distSq > CORRECTION_THRESHOLD * CORRECTION_THRESHOLD) {
+        const nx = cx + (sx - cx) * LERP_FACTOR;
+        const ny = cy + (sy - cy) * LERP_FACTOR;
+        const nz = cz + (sz - cz) * LERP_FACTOR;
+        cameraModule.setPosition([nx, ny, nz]);
+      }
+    }
+
     const mvpMatrix = cameraModule.calculateMVP();
-
     const lightDirArray = new Float32Array([app.lightDir.x, app.lightDir.y, app.lightDir.z]);
     renderer.render(
       new Float32Array(mvpMatrix),
@@ -206,10 +246,6 @@ async function initializeApp(): Promise<AppData> {
   registerRecurringAnimation(render);
 
   initializeDevTools(app, profilerData);
-  network.start();
-  window.addEventListener('beforeunload', () => {
-    network.stop();
-  });
 
   // Hide loading indicator
   document.getElementById('loading')?.classList.add('hidden');
