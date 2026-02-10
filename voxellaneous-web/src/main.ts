@@ -154,6 +154,11 @@ async function initializeApp(): Promise<AppData> {
     window.clearInterval(remoteSceneInterval);
   });
 
+  // Pre-allocate arrays to avoid per-frame allocations
+  const lightDirArray = new Float32Array(3);
+  const mvpArray = new Float32Array(16);
+  const cameraPositionArray = new Float32Array(3);
+
   // NOW start render loop after scene is uploaded
   const render: FrameRequestCallback = (time) => {
     autoresizeCanvas();
@@ -166,10 +171,16 @@ async function initializeApp(): Promise<AppData> {
     );
     const mvpMatrix = cameraModule.calculateMVP();
 
-    const lightDirArray = new Float32Array([app.lightDir.x, app.lightDir.y, app.lightDir.z]);
+    // Reuse pre-allocated arrays
+    lightDirArray[0] = app.lightDir.x;
+    lightDirArray[1] = app.lightDir.y;
+    lightDirArray[2] = app.lightDir.z;
+    mvpArray.set(mvpMatrix);
+    cameraPositionArray.set(cameraModule.position);
+
     renderer.render(
-      new Float32Array(mvpMatrix),
-      new Float32Array(cameraModule.position),
+      mvpArray,
+      cameraPositionArray,
       app.presentTarget,
       lightDirArray,
       app.ambient,

@@ -51,8 +51,10 @@ export class Renderer {
   private perFrameUniformBuffer: GPUBuffer;
   private lightingUniformBuffer: GPUBuffer;
 
-  // Bind groups
+  // Bind groups (cached to avoid per-frame allocation)
   private staticBindGroup: GPUBindGroup;
+  private perFrameBindGroup: GPUBindGroup | null = null;
+  private lightingBindGroup: GPUBindGroup | null = null;
 
   // Textures
   private gbufferAlbedo: GPUTextureView;
@@ -63,6 +65,12 @@ export class Renderer {
 
   // Draw call data
   private drawCallArray: DrawCallData[] = [];
+
+  // Reusable buffers to avoid per-frame allocations
+  private perFrameDataBuffer = new ArrayBuffer(UNIFORM_SIZES.PER_FRAME);
+  private perFrameDataView = new DataView(this.perFrameDataBuffer);
+  private lightingDataBuffer = new ArrayBuffer(UNIFORM_SIZES.LIGHTING);
+  private lightingDataView = new DataView(this.lightingDataBuffer);
 
   private constructor(
     device: GPUDevice,
@@ -309,7 +317,7 @@ export class Renderer {
       },
       primitive: {
         topology: 'triangle-list',
-        cullMode: 'none',
+        cullMode: 'none', // Required for raymarching - camera can be inside bbox
       },
       depthStencil: {
         format: 'depth24plus-stencil8',
@@ -520,6 +528,9 @@ export class Renderer {
     this.gbufferAlbedo = createRenderTextureView(this.device, width, height, 'rgba8unorm', 'GBuffer Albedo');
     this.gbufferNormal = createRenderTextureView(this.device, width, height, 'rgba8unorm', 'GBuffer Normal');
     this.gbufferLinearZ = createRenderTextureView(this.device, width, height, 'r16uint', 'GBuffer LinearZ');
+
+    // Invalidate cached bind groups that reference gbuffer textures
+    this.lightingBindGroup = null;
   }
 
   render(
@@ -531,9 +542,8 @@ export class Renderer {
     lightIntensity: number,
     showBboxes: boolean,
   ): void {
-    // Update per-frame uniforms
-    const perFrameData = new ArrayBuffer(UNIFORM_SIZES.PER_FRAME);
-    const perFrameView = new DataView(perFrameData);
+    // Reuse pre-allocated buffers for uniform data
+    const perFrameView = this.perFrameDataView;
 
     // Write vp_matrix (16 floats = 64 bytes)
     for (let i = 0; i < 16; i++) {
@@ -545,11 +555,10 @@ export class Renderer {
     perFrameView.setFloat32(72, viewPosition[2], true);
     // padding at offset 76 (4 bytes)
 
-    this.queue.writeBuffer(this.perFrameUniformBuffer, 0, perFrameData);
+    this.queue.writeBuffer(this.perFrameUniformBuffer, 0, this.perFrameDataBuffer);
 
-    // Update lighting uniforms
-    const lightingData = new ArrayBuffer(UNIFORM_SIZES.LIGHTING);
-    const lightingView = new DataView(lightingData);
+    // Reuse pre-allocated lighting buffer
+    const lightingView = this.lightingDataView;
     lightingView.setFloat32(0, lightDir[0], true);
     lightingView.setFloat32(4, lightDir[1], true);
     lightingView.setFloat32(8, lightDir[2], true);
@@ -557,19 +566,22 @@ export class Renderer {
     lightingView.setFloat32(16, lightIntensity, true);
     // padding at offset 20 (12 bytes)
 
-    this.queue.writeBuffer(this.lightingUniformBuffer, 0, lightingData);
+    this.queue.writeBuffer(this.lightingUniformBuffer, 0, this.lightingDataBuffer);
 
-    // Create per-frame bind group
-    const perFrameBindGroup = this.device.createBindGroup({
-      label: 'Per Frame Bind Group',
-      layout: this.perFrameBindGroupLayout,
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: this.perFrameUniformBuffer },
-        },
-      ],
-    });
+    // Cache per-frame bind group (buffer content updates don't require new bind group)
+    if (!this.perFrameBindGroup) {
+      this.perFrameBindGroup = this.device.createBindGroup({
+        label: 'Per Frame Bind Group',
+        layout: this.perFrameBindGroupLayout,
+        entries: [
+          {
+            binding: 0,
+            resource: { buffer: this.perFrameUniformBuffer },
+          },
+        ],
+      });
+    }
+    const perFrameBindGroup = this.perFrameBindGroup;
 
     const encoder = this.device.createCommandEncoder();
 
@@ -641,18 +653,21 @@ export class Renderer {
 
       if (presentTarget === 4) {
         // Lit mode: use lighting pipeline
-        const lightingBind = this.device.createBindGroup({
-          label: 'Lighting BG',
-          layout: this.lightingLayout,
-          entries: [
-            { binding: 0, resource: this.gbufferAlbedo },
-            { binding: 1, resource: this.gbufferNormal },
-            { binding: 2, resource: this.sampler },
-            { binding: 3, resource: { buffer: this.lightingUniformBuffer } },
-          ],
-        });
+        // Cache lighting bind group (invalidated on resize)
+        if (!this.lightingBindGroup) {
+          this.lightingBindGroup = this.device.createBindGroup({
+            label: 'Lighting BG',
+            layout: this.lightingLayout,
+            entries: [
+              { binding: 0, resource: this.gbufferAlbedo },
+              { binding: 1, resource: this.gbufferNormal },
+              { binding: 2, resource: this.sampler },
+              { binding: 3, resource: { buffer: this.lightingUniformBuffer } },
+            ],
+          });
+        }
         pass.setPipeline(this.lightingPipeline);
-        pass.setBindGroup(0, lightingBind);
+        pass.setBindGroup(0, this.lightingBindGroup);
       } else {
         // G-buffer debug modes
         let pipeline: GPURenderPipeline;
