@@ -1,18 +1,14 @@
 import { vec3, mat4 } from 'gl-matrix';
-import { VoxelObject } from '../scene';
+import { VoxelObject, HeightmapObject } from '../scene';
 import { TERRAIN_PALETTE } from './chunk';
 import { Chunk, ChunkCoord, TerrainConfig, DEFAULT_TERRAIN_CONFIG, chunkKey } from './types';
 import type { WorkerMessage, WorkerResultMessage } from './terrain-worker';
 
-/** Create a unique key for a chunk at a specific LOD */
-function chunkLodKey(coord: ChunkCoord, lod: number): string {
-  return `${coord.x},${coord.y},${coord.z},lod${lod}`;
+/** Key for a terrain column: (x, z) at a specific LOD — no Y */
+function columnLodKey(x: number, z: number, lod: number): string {
+  return `${x},${z},lod${lod}`;
 }
 
-/**
- * Manages terrain chunk loading and unloading based on camera position.
- * Uses a Web Worker for terrain generation.
- */
 const MAX_PENDING_REQUESTS = 64;
 
 export class ChunkManager {
@@ -20,8 +16,10 @@ export class ChunkManager {
   private worker: Worker;
   private chunks: Map<string, Chunk> = new Map();
   private pendingChunks: Set<string> = new Set();
-  private nonSurfaceChunks: Set<string> = new Set(); // Chunks confirmed empty or solid
-  private lastPlayerChunk: ChunkCoord | null = null;
+  /** Permanent cache of generated chunk data — never regenerate from noise */
+  private chunkCache: Map<string, WorkerResultMessage> = new Map();
+  private lastPlayerChunkX: number | null = null;
+  private lastPlayerChunkZ: number | null = null;
   private lastPlayerPosition: vec3 | null = null;
   private chunksChanged = true;
   private grassPaletteIndex = 1;
@@ -30,12 +28,9 @@ export class ChunkManager {
   constructor(config: Partial<TerrainConfig> = {}) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config };
 
-    // Create and initialize the worker
     this.worker = new Worker(new URL('./terrain-worker.ts', import.meta.url), { type: 'module' });
-
     this.worker.onmessage = this.handleWorkerMessage.bind(this);
 
-    // Initialize worker with config
     const initMsg: WorkerMessage = { type: 'init', config: this.config };
     this.worker.postMessage(initMsg);
   }
@@ -44,54 +39,68 @@ export class ChunkManager {
     const msg = e.data;
 
     if (msg.type === 'result') {
-      const key = chunkLodKey(msg.coord, msg.lod);
+      const key = columnLodKey(msg.x, msg.z, msg.lod);
       this.pendingChunks.delete(key);
 
-      // If voxels is null, chunk is empty/solid - track it so we don't re-request
-      if (!msg.voxels) {
-        const coordKey = `${msg.coord.x},${msg.coord.y},${msg.coord.z},lod${msg.lod}`;
-        this.nonSurfaceChunks.add(coordKey);
-        return;
-      }
+      // Cache permanently (even across unload/reload cycles)
+      this.chunkCache.set(key, msg);
 
-      // Create VoxelObject from the received data
-      const voxelObject = this.createVoxelObject(msg.coord, msg.voxels, msg.lod, msg.lodChunkSize);
-
-      const chunk: Chunk = {
-        coord: msg.coord,
-        lod: msg.lod,
-        voxelObject,
-        lastAccessed: Date.now(),
-      };
-
-      this.chunks.set(key, chunk);
-      this.chunksChanged = true;
-
-      // Queue Y neighbors to discover terrain extent
-      this.queueYNeighbors(msg.coord, msg.lod);
+      this.materializeFromCache(key, msg);
     }
   }
 
-  private queueYNeighbors(coord: ChunkCoord, lod: number): void {
-    const neighbors = [
-      { ...coord, y: coord.y - 2 },
-      { ...coord, y: coord.y + 2 },
-    ];
+  /** Create a visible Chunk from cached worker data */
+  private materializeFromCache(key: string, msg: WorkerResultMessage): void {
+    const coord: ChunkCoord = { x: msg.x, y: msg.chunkY, z: msg.z };
+    const heightmapObject = this.createHeightmapObject(
+      coord, msg.heightmap, msg.lod, msg.lodChunkSize, msg.grassPaletteIndex,
+      msg.minWorldY, msg.worldYExtent,
+    );
+    const chunk: Chunk = {
+      coord,
+      lod: msg.lod,
+      dataType: 'heightmap',
+      heightmapObject,
+      lastAccessed: Date.now(),
+    };
+    this.chunks.set(key, chunk);
+    this.chunksChanged = true;
+  }
 
-    for (const neighborCoord of neighbors) {
-      const key = chunkLodKey(neighborCoord, lod);
-      const coordKey = `${neighborCoord.x},${neighborCoord.y},${neighborCoord.z},lod${lod}`;
+  private createHeightmapObject(
+    coord: ChunkCoord, heightmap: Uint8Array, lod: number, lodChunkSize: number, paletteIndex: number,
+    minWorldY: number, worldYExtent: number,
+  ): HeightmapObject {
+    const { worldScale } = this.config;
 
-      if (!this.chunks.has(key) && !this.pendingChunks.has(key) && !this.nonSurfaceChunks.has(coordKey)) {
-        this.requestChunkGeneration(neighborCoord, lod);
-      }
-    }
+    const lodScale = Math.pow(2, lod);
+    const lodWorldScale = worldScale * lodScale;
+
+    const worldX = coord.x * lodWorldScale;
+    const worldZ = coord.z * lodWorldScale;
+
+    // Non-uniform Y: box fits exact height range, not a cube
+    const modelMatrix = mat4.create();
+    mat4.translate(modelMatrix, modelMatrix, [worldX, minWorldY + worldYExtent / 2, worldZ]);
+    mat4.scale(modelMatrix, modelMatrix, [lodWorldScale, worldYExtent, lodWorldScale]);
+
+    const invModelMatrix = mat4.create();
+    mat4.invert(invModelMatrix, modelMatrix);
+
+    return {
+      id: `terrain_hm_${chunkKey(coord)}_lod${lod}`,
+      modelMatrix,
+      invModelMatrix,
+      dims: [lodChunkSize, lodChunkSize],
+      heightmap,
+      palette: TERRAIN_PALETTE,
+      paletteIndex,
+    };
   }
 
   private createVoxelObject(coord: ChunkCoord, voxels: Uint8Array, lod: number, lodChunkSize: number): VoxelObject {
     const { worldScale } = this.config;
 
-    // LOD increases world scale per chunk
     const lodScale = Math.pow(2, lod);
     const lodWorldScale = worldScale * lodScale;
 
@@ -120,8 +129,9 @@ export class ChunkManager {
     this.grassPaletteIndex = index;
     this.chunks.clear();
     this.pendingChunks.clear();
-    this.nonSurfaceChunks.clear();
-    this.lastPlayerChunk = null;
+    this.chunkCache.clear();
+    this.lastPlayerChunkX = null;
+    this.lastPlayerChunkZ = null;
     this.chunksChanged = true;
   }
 
@@ -130,8 +140,9 @@ export class ChunkManager {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config };
     this.chunks.clear();
     this.pendingChunks.clear();
-    this.nonSurfaceChunks.clear();
-    this.lastPlayerChunk = null;
+    this.chunkCache.clear();
+    this.lastPlayerChunkX = null;
+    this.lastPlayerChunkZ = null;
     this.chunksChanged = true;
 
     const initMsg: WorkerMessage = { type: 'init', config: this.config };
@@ -147,21 +158,26 @@ export class ChunkManager {
     };
   }
 
-  private requestChunkGeneration(coord: ChunkCoord, lod: number): void {
-    const key = chunkLodKey(coord, lod);
+  private requestChunkGeneration(x: number, z: number, lod: number): void {
+    const key = columnLodKey(x, z, lod);
     if (this.pendingChunks.has(key) || this.chunks.has(key)) return;
-    if (this.pendingChunks.size >= MAX_PENDING_REQUESTS) return;
 
-    // Skip if we already know this coord is non-surface
-    const coordKey = `${coord.x},${coord.y},${coord.z},lod${lod}`;
-    if (this.nonSurfaceChunks.has(coordKey)) return;
+    // Restore from cache instantly — no worker roundtrip
+    const cached = this.chunkCache.get(key);
+    if (cached) {
+      this.materializeFromCache(key, cached);
+      return;
+    }
+
+    if (this.pendingChunks.size >= MAX_PENDING_REQUESTS) return;
 
     this.pendingChunks.add(key);
 
     const msg: WorkerMessage = {
       type: 'generate',
       id: `${this.requestId++}`,
-      coord,
+      x,
+      z,
       lod,
       grassPaletteIndex: this.grassPaletteIndex,
     };
@@ -170,40 +186,37 @@ export class ChunkManager {
   }
 
   update(playerPosition: vec3): boolean {
-    const playerChunk = this.worldToChunkCoord(playerPosition);
-    const playerMoved =
-      !this.lastPlayerChunk ||
-      this.lastPlayerChunk.x !== playerChunk.x ||
-      this.lastPlayerChunk.y !== playerChunk.y ||
-      this.lastPlayerChunk.z !== playerChunk.z;
+    const { worldScale } = this.config;
+    const playerChunkX = Math.floor(playerPosition[0] / worldScale);
+    const playerChunkZ = Math.floor(playerPosition[2] / worldScale);
 
-    // Always update position for smooth distance calculations
+    const playerMoved =
+      this.lastPlayerChunkX !== playerChunkX ||
+      this.lastPlayerChunkZ !== playerChunkZ;
+
     this.lastPlayerPosition = playerPosition;
 
     if (playerMoved) {
-      this.lastPlayerChunk = playerChunk;
+      this.lastPlayerChunkX = playerChunkX;
+      this.lastPlayerChunkZ = playerChunkZ;
 
-      // Unload distant chunks
-      const { lodLevels, renderDistanceV, worldScale } = this.config;
+      const { lodLevels } = this.config;
       const playerWorldX = playerPosition[0];
-      const playerWorldY = playerPosition[1];
       const playerWorldZ = playerPosition[2];
 
+      // Unload distant chunks (keyed by xz column)
       for (const [key, chunk] of this.chunks.entries()) {
         const lodScale = Math.pow(2, chunk.lod);
         const lodWorldScale = worldScale * lodScale;
 
-        // Use square distance (consistent with loading logic)
         const playerLodChunkX = Math.floor(playerWorldX / lodWorldScale);
         const playerLodChunkZ = Math.floor(playerWorldZ / lodWorldScale);
         const chunkDistX = Math.abs(chunk.coord.x - playerLodChunkX) * lodWorldScale;
         const chunkDistZ = Math.abs(chunk.coord.z - playerLodChunkZ) * lodWorldScale;
         const worldDistH = Math.max(chunkDistX, chunkDistZ);
 
-        // Max horizontal distance
         const maxWorldDistH = lodLevels[chunk.lod] * worldScale + lodWorldScale * 2;
 
-        // Unload if too far horizontally (Y is based on terrain bounds, not player)
         if (worldDistH > maxWorldDistH) {
           this.chunks.delete(key);
           this.chunksChanged = true;
@@ -214,31 +227,22 @@ export class ChunkManager {
         if (chunk.lod > 0) {
           const minWorldDistH = lodLevels[chunk.lod - 1] * worldScale;
           if (worldDistH < minWorldDistH) {
-            // For LOD 1-2, check if replacements are ready (prevents flicker near player)
-            if (chunk.lod <= 2) {
-              const hx = chunk.coord.x * 2;
-              const hy = chunk.coord.y * 2;
-              const hz = chunk.coord.z * 2;
-              const higherLod = chunk.lod - 1;
+            // Check if 4 higher-LOD children (2x2 in xz) are ready
+            const hx = chunk.coord.x * 2;
+            const hz = chunk.coord.z * 2;
+            const higherLod = chunk.lod - 1;
 
-              let allReady = true;
-              for (let dx = 0; dx < 2 && allReady; dx++) {
-                for (let dy = 0; dy < 2 && allReady; dy++) {
-                  for (let dz = 0; dz < 2 && allReady; dz++) {
-                    const hKey = `${hx + dx},${hy + dy},${hz + dz},lod${higherLod}`;
-                    if (!this.chunks.has(hKey) && !this.nonSurfaceChunks.has(hKey)) {
-                      allReady = false;
-                    }
-                  }
+            let allReady = true;
+            for (let dx = 0; dx < 2 && allReady; dx++) {
+              for (let dz = 0; dz < 2 && allReady; dz++) {
+                const hKey = columnLodKey(hx + dx, hz + dz, higherLod);
+                if (!this.chunks.has(hKey)) {
+                  allReady = false;
                 }
               }
+            }
 
-              if (allReady) {
-                this.chunks.delete(key);
-                this.chunksChanged = true;
-              }
-            } else {
-              // Higher LODs (2+) unload immediately - they're far enough that brief gap is OK
+            if (allReady) {
               this.chunks.delete(key);
               this.chunksChanged = true;
             }
@@ -257,81 +261,55 @@ export class ChunkManager {
     return changed;
   }
 
+  /** Queue chunks for loading — iterates only (x, z) per LOD, no Y loop */
   private queueChunksForLoading(playerPosition: vec3): void {
     const { lodLevels, worldScale } = this.config;
 
-    // Use actual player world position for horizontal distance
     const playerWorldX = playerPosition[0];
     const playerWorldZ = playerPosition[2];
 
-    // Build list of candidates sorted by distance
-    const candidates: { coord: ChunkCoord; lod: number; dist: number }[] = [];
+    const candidates: { x: number; z: number; lod: number; dist: number }[] = [];
 
-    // Process each LOD level separately
     for (let lod = 0; lod < lodLevels.length; lod++) {
       const lodScale = Math.pow(2, lod);
       const lodWorldScale = worldScale * lodScale;
 
-      // Distance thresholds in world units
       const minWorldDist = lod === 0 ? 0 : lodLevels[lod - 1] * worldScale;
       const maxWorldDist = lodLevels[lod] * worldScale;
 
-      // Player chunk in this LOD's coordinate system
       const playerLodChunkX = Math.floor(playerWorldX / lodWorldScale);
       const playerLodChunkZ = Math.floor(playerWorldZ / lodWorldScale);
 
-      // Radius in this LOD's chunk units
       const radiusInLod = Math.ceil(maxWorldDist / lodWorldScale) + 1;
 
       for (let dx = -radiusInLod; dx <= radiusInLod; dx++) {
         for (let dz = -radiusInLod; dz <= radiusInLod; dz++) {
-          // Simple square check using chunk distance
           const chunkDistX = Math.abs(dx) * lodWorldScale;
           const chunkDistZ = Math.abs(dz) * lodWorldScale;
           const maxChunkDist = Math.max(chunkDistX, chunkDistZ);
 
-          // Skip if outside this LOD's range or inside inner LOD's range
           if (maxChunkDist > maxWorldDist) continue;
           if (lod > 0 && maxChunkDist < minWorldDist) continue;
 
-          // Y range - extend lower bound more to catch deep valleys
-          const { baseTerrainHeight, heightScale } = this.config;
-          const terrainMinY = baseTerrainHeight - heightScale * 2;
-          const terrainMaxY = baseTerrainHeight + heightScale * 2;
+          const x = playerLodChunkX + dx;
+          const z = playerLodChunkZ + dz;
 
-          // Convert to this LOD's chunk coordinates
-          const yMin = Math.floor(terrainMinY / lodWorldScale) - 1;
-          const yMax = Math.ceil(terrainMaxY / lodWorldScale) + 1;
+          const key = columnLodKey(x, z, lod);
+          if (this.chunks.has(key)) continue;
+          if (this.pendingChunks.has(key)) continue;
 
-          for (let y = yMin; y <= yMax; y++) {
-            const coord: ChunkCoord = {
-              x: playerLodChunkX + dx,
-              y: y,
-              z: playerLodChunkZ + dz,
-            };
-
-            const key = chunkLodKey(coord, lod);
-            if (this.chunks.has(key)) continue;
-            if (this.pendingChunks.has(key)) continue;
-
-            const coordKey = `${coord.x},${coord.y},${coord.z},lod${lod}`;
-            if (this.nonSurfaceChunks.has(coordKey)) continue;
-
-            // Priority: LOD first (lower LOD = higher priority), then distance
-            const dist = lod * 10000 + maxChunkDist;
-            candidates.push({ coord, lod, dist });
-          }
+          const dist = lod * 100000 + maxChunkDist;
+          candidates.push({ x, z, lod, dist });
         }
       }
     }
 
-    // Sort by priority (LOD 0 first, then by distance)
+    // Sort by priority (LOD 0 first, then by horizontal distance)
     candidates.sort((a, b) => a.dist - b.dist);
 
     // If queue is full and we have LOD 0 candidates, clear distant higher-LOD pending
     const lod0Candidates = candidates.filter((c) => c.lod === 0);
     if (lod0Candidates.length > 0 && this.pendingChunks.size >= MAX_PENDING_REQUESTS) {
-      // Clear higher-LOD pending to make room for LOD 0
       for (const key of this.pendingChunks) {
         if (!key.includes('lod0')) {
           this.pendingChunks.delete(key);
@@ -342,12 +320,20 @@ export class ChunkManager {
 
     const maxToQueue = MAX_PENDING_REQUESTS - this.pendingChunks.size;
     for (let i = 0; i < Math.min(candidates.length, maxToQueue); i++) {
-      this.requestChunkGeneration(candidates[i].coord, candidates[i].lod);
+      this.requestChunkGeneration(candidates[i].x, candidates[i].z, candidates[i].lod);
     }
   }
 
   getVisibleChunks(): VoxelObject[] {
-    return Array.from(this.chunks.values()).map((chunk) => chunk.voxelObject);
+    return Array.from(this.chunks.values())
+      .filter((c) => c.dataType === 'voxel' && c.voxelObject)
+      .map((c) => c.voxelObject!);
+  }
+
+  getVisibleHeightmapChunks(): HeightmapObject[] {
+    return Array.from(this.chunks.values())
+      .filter((c) => c.dataType === 'heightmap' && c.heightmapObject)
+      .map((c) => c.heightmapObject!);
   }
 
   getLoadedChunkCount(): number {

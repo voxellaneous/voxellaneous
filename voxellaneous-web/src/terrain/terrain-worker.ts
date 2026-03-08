@@ -3,8 +3,7 @@
 import * as NoiseModule from 'noisejs';
 const Noise = (NoiseModule as any).Noise || NoiseModule;
 
-import { ChunkCoord, TerrainConfig, NoiseLayer } from './types';
-import { ByteArray } from '../common/types';
+import { TerrainConfig, NoiseLayer } from './types';
 
 type NoiseGenerator = InstanceType<typeof Noise>;
 
@@ -64,96 +63,54 @@ function sampleTerrainHeight(
   return height;
 }
 
-/** Check chunk terrain type */
-function getChunkTerrainType(
-  coord: ChunkCoord,
+/** Generate heightmap for a column at (x, z) in LOD coordinates.
+ *  Computes optimal Y placement from terrain sampling — no Y input needed. */
+function generateColumnHeightmap(
+  x: number,
+  z: number,
+  lod: number,
   config: TerrainConfig,
   generators: Map<number, NoiseGenerator>,
-  lod: number,
-): 'empty' | 'solid' | 'surface' {
-  const { worldScale } = config;
-
+): { heightmap: Uint8Array; chunkY: number; minWorldY: number; worldYExtent: number } {
+  const { chunkSize, worldScale } = config;
   const lodScale = Math.pow(2, lod);
   const lodWorldScale = worldScale * lodScale;
+  const voxelSize = lodWorldScale / chunkSize;
 
-  // Apply same offset as terrain generation
-  const lodHeightOffset = lodWorldScale * 0.5;
+  const worldX = x * lodWorldScale;
+  const worldZ = z * lodWorldScale;
 
-  const chunkMinY = coord.y * lodWorldScale;
-  const chunkMaxY = chunkMinY + lodWorldScale;
-
-  const worldX = coord.x * lodWorldScale;
-  const worldZ = coord.z * lodWorldScale;
-  const step = lodWorldScale / 4;
-
+  // Single pass: sample all terrain heights and find min/max
+  const heights = new Float64Array(chunkSize * chunkSize);
   let minHeight = Infinity;
   let maxHeight = -Infinity;
 
-  for (let sx = 0; sx <= 4; sx++) {
-    for (let sz = 0; sz <= 4; sz++) {
-      const h = sampleTerrainHeight(worldX + sx * step, worldZ + sz * step, config, generators);
+  for (let lx = 0; lx < chunkSize; lx++) {
+    for (let lz = 0; lz < chunkSize; lz++) {
+      const wx = worldX + (lx + 0.5) * voxelSize - lodWorldScale * 0.5;
+      const wz = worldZ + (lz + 0.5) * voxelSize - lodWorldScale * 0.5;
+      const h = sampleTerrainHeight(wx, wz, config, generators);
+      heights[lx + lz * chunkSize] = h;
       minHeight = Math.min(minHeight, h);
       maxHeight = Math.max(maxHeight, h);
     }
   }
 
-  // Apply LOD offset
-  maxHeight += lodHeightOffset;
-  minHeight += lodHeightOffset;
+  // Non-cubic Y: fits exact height range with padding.
+  // Uses full [0,255] range for sub-voxel precision.
+  const padding = voxelSize;
+  const minWorldY = minHeight - padding;
+  const worldYExtent = Math.max(maxHeight - minHeight + 2 * padding, voxelSize);
+  const chunkY = Math.floor(minHeight / lodWorldScale);
 
-  const voxelSize = lodWorldScale / config.chunkSize;
-
-  if (chunkMinY >= maxHeight) return 'empty';
-  // Only solid if min terrain is at least one voxel above chunk top
-  if (chunkMaxY + voxelSize <= minHeight) return 'solid';
-
-  return 'surface';
-}
-
-/** Generate voxel data for a chunk */
-function generateChunkVoxels(
-  coord: ChunkCoord,
-  config: TerrainConfig,
-  generators: Map<number, NoiseGenerator>,
-  grassPaletteIndex: number,
-  lod: number,
-): ByteArray {
-  const { chunkSize, worldScale } = config;
-
-  const lodScale = Math.pow(2, lod);
-  const lodWorldScale = worldScale * lodScale;
-
-  const total = chunkSize * chunkSize * chunkSize;
-  const voxels = new Uint8Array(total);
-
-  const chunkWorldX = coord.x * lodWorldScale;
-  const chunkWorldY = coord.y * lodWorldScale;
-  const chunkWorldZ = coord.z * lodWorldScale;
-
-  const voxelSize = lodWorldScale / chunkSize;
-
-  // Compensate for LOD quantization
-  const lodHeightOffset = lodWorldScale * 0.5;
-
-  for (let lx = 0; lx < chunkSize; lx++) {
-    for (let lz = 0; lz < chunkSize; lz++) {
-      const worldX = chunkWorldX + (lx + 0.5) * voxelSize;
-      const worldZ = chunkWorldZ + (lz + 0.5) * voxelSize;
-
-      const terrainHeight = sampleTerrainHeight(worldX, worldZ, config, generators) + lodHeightOffset;
-
-      for (let ly = 0; ly < chunkSize; ly++) {
-        const voxelCenterY = chunkWorldY + (ly + 0.5) * voxelSize;
-
-        if (voxelCenterY <= terrainHeight) {
-          const index = lx + ly * chunkSize + lz * chunkSize * chunkSize;
-          voxels[index] = grassPaletteIndex;
-        }
-      }
-    }
+  // Encode height as fraction of worldYExtent → [0, 255]
+  const heightmap = new Uint8Array(chunkSize * chunkSize);
+  for (let i = 0; i < chunkSize * chunkSize; i++) {
+    const frac = (heights[i] - minWorldY) / worldYExtent;
+    heightmap[i] = Math.max(0, Math.min(255, Math.round(frac * 255)));
   }
 
-  return voxels;
+  return { heightmap, chunkY, minWorldY, worldYExtent };
 }
 
 // Message types
@@ -165,7 +122,8 @@ export interface WorkerInitMessage {
 export interface WorkerGenerateMessage {
   type: 'generate';
   id: string;
-  coord: ChunkCoord;
+  x: number;
+  z: number;
   lod: number;
   grassPaletteIndex: number;
 }
@@ -175,10 +133,18 @@ export type WorkerMessage = WorkerInitMessage | WorkerGenerateMessage;
 export interface WorkerResultMessage {
   type: 'result';
   id: string;
-  coord: ChunkCoord;
+  x: number;
+  z: number;
+  /** Y chunk coordinate computed from terrain height sampling (for ID) */
+  chunkY: number;
+  /** Exact world-space Y bottom of the chunk box */
+  minWorldY: number;
+  /** World-space Y extent of the chunk box (may differ from lodWorldScale) */
+  worldYExtent: number;
   lod: number;
-  voxels: ByteArray | null; // null if chunk is empty/solid
+  heightmap: Uint8Array;
   lodChunkSize: number;
+  grassPaletteIndex: number;
 }
 
 // Handle messages from main thread
@@ -197,35 +163,24 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
   }
 
   if (msg.type === 'generate') {
-    // Check if this chunk contains terrain surface
-    const terrainType = getChunkTerrainType(msg.coord, currentConfig, noiseGenerators, msg.lod);
-
-    if (terrainType !== 'surface') {
-      // Return null for empty/solid chunks
-      const response: WorkerResultMessage = {
-        type: 'result',
-        id: msg.id,
-        coord: msg.coord,
-        lod: msg.lod,
-        voxels: null,
-        lodChunkSize: currentConfig.chunkSize,
-      };
-      self.postMessage(response);
-      return;
-    }
-
-    const voxels = generateChunkVoxels(msg.coord, currentConfig, noiseGenerators, msg.grassPaletteIndex, msg.lod);
+    const { heightmap, chunkY, minWorldY, worldYExtent } = generateColumnHeightmap(
+      msg.x, msg.z, msg.lod, currentConfig, noiseGenerators,
+    );
 
     const response: WorkerResultMessage = {
       type: 'result',
       id: msg.id,
-      coord: msg.coord,
+      x: msg.x,
+      z: msg.z,
+      chunkY,
+      minWorldY,
+      worldYExtent,
       lod: msg.lod,
-      voxels,
+      heightmap,
       lodChunkSize: currentConfig.chunkSize,
+      grassPaletteIndex: msg.grassPaletteIndex,
     };
 
-    // Transfer the buffer for efficiency
-    self.postMessage(response, { transfer: [voxels.buffer as ArrayBuffer] });
+    self.postMessage(response, { transfer: [heightmap.buffer as ArrayBuffer] });
   }
 };

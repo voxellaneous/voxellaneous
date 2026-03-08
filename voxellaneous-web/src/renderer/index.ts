@@ -4,11 +4,13 @@
  */
 
 import { DrawCallData, Scene, UNIFORM_SIZES, RGBA, SceneObject as VoxelObject } from './types';
+import type { HeightmapObject } from '../scene';
 import { CUBE_VERTICES, CUBE_INDICES, CUBE_EDGE_INDICES, VERTEX_STRIDE } from './constants';
 import { packRGBATuple } from './utils';
 
 // Import shaders as raw strings
 import shaderWgsl from './shaders/shader.wgsl?raw';
+import heightmapWgsl from './shaders/heightmap.wgsl?raw';
 import quadLightingWgsl from './shaders/quad_lighting.wgsl?raw';
 import quadFloatWgsl from './shaders/quad_float.wgsl?raw';
 import quadUintWgsl from './shaders/quad_uint.wgsl?raw';
@@ -65,6 +67,12 @@ export class Renderer {
   private staticDrawCalls: DrawCallData[] = [];
   private dynamicDrawCalls: DrawCallData[] = [];
   private dynamicDrawCallCache: Map<string, DrawCallData> = new Map();
+
+  // Heightmap pipeline and draw calls
+  private heightmapPipeline!: GPURenderPipeline;
+  private heightmapPerDrawBindGroupLayout!: GPUBindGroupLayout;
+  private heightmapDrawCalls: DrawCallData[] = [];
+  private heightmapDrawCallCache: Map<string, DrawCallData> = new Map();
 
   private constructor(
     device: GPUDevice,
@@ -476,7 +484,77 @@ export class Renderer {
       },
     });
 
-    return new Renderer(
+    // Create heightmap pipeline (2D texture instead of 3D)
+    const heightmapPerDrawBindGroupLayout = device.createBindGroupLayout({
+      label: 'Heightmap Per Draw Bind Group Layout',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: {
+            sampleType: 'uint',
+            viewDimension: '2d',
+          },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' },
+        },
+      ],
+    });
+
+    const heightmapShader = device.createShaderModule({
+      label: 'Heightmap Shader',
+      code: heightmapWgsl,
+    });
+
+    const heightmapPipelineLayout = device.createPipelineLayout({
+      label: 'Heightmap Pipeline Layout',
+      bindGroupLayouts: [perFrameBindGroupLayout, heightmapPerDrawBindGroupLayout],
+    });
+
+    const heightmapPipeline = device.createRenderPipeline({
+      label: 'Heightmap G-Buffer Pipeline',
+      layout: heightmapPipelineLayout,
+      vertex: {
+        module: heightmapShader,
+        entryPoint: 'vs_main',
+        buffers: [
+          {
+            arrayStride: VERTEX_STRIDE,
+            stepMode: 'vertex',
+            attributes: [
+              {
+                shaderLocation: 0,
+                offset: 0,
+                format: 'float32x3',
+              },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: heightmapShader,
+        entryPoint: 'fs_main',
+        targets: [
+          { format: 'rgba8unorm' }, // albedo
+          { format: 'rgba8unorm' }, // normal
+          { format: 'r16uint' }, // linearZ
+        ],
+      },
+      primitive: {
+        topology: 'triangle-list',
+        cullMode: 'none',
+      },
+      depthStencil: {
+        format: 'depth24plus-stencil8',
+        depthWriteEnabled: true,
+        depthCompare: 'greater', // Reverse-Z
+      },
+    });
+
+    const renderer = new Renderer(
       device,
       queue,
       adapterInfo,
@@ -506,6 +584,11 @@ export class Renderer {
       depthTextureView,
       sampler,
     );
+
+    renderer.heightmapPipeline = heightmapPipeline;
+    renderer.heightmapPerDrawBindGroupLayout = heightmapPerDrawBindGroupLayout;
+
+    return renderer;
   }
 
   resize(width: number, height: number): void {
@@ -624,6 +707,15 @@ export class Renderer {
         pass.drawIndexed(CUBE_INDICES.length);
       }
 
+      // Heightmap draws (same G-buffer, different pipeline)
+      if (this.heightmapDrawCalls.length > 0) {
+        pass.setPipeline(this.heightmapPipeline);
+        for (const dc of this.heightmapDrawCalls) {
+          pass.setBindGroup(1, dc.bindGroup);
+          pass.drawIndexed(CUBE_INDICES.length);
+        }
+      }
+
       pass.end();
     }
 
@@ -725,7 +817,7 @@ export class Renderer {
       pass.setVertexBuffer(0, this.vertexBuffer);
       pass.setIndexBuffer(this.edgeIndexBuffer, 'uint16');
 
-      const allDrawCalls = [...this.staticDrawCalls, ...this.dynamicDrawCalls];
+      const allDrawCalls = [...this.staticDrawCalls, ...this.dynamicDrawCalls, ...this.heightmapDrawCalls];
       for (const dc of allDrawCalls) {
         const wireframeBg = this.device.createBindGroup({
           label: 'Wireframe BG',
@@ -840,6 +932,88 @@ export class Renderer {
     this.dynamicDrawCalls = scene.objects
       .map((obj) => this.dynamicDrawCallCache.get(obj.id)!)
       .filter(Boolean);
+
+    // Handle heightmap objects
+    const heightmapObjects = scene.heightmapObjects ?? [];
+    const hmCurrentIds = new Set(heightmapObjects.map((o) => o.id));
+    const hmCachedIds = new Set(this.heightmapDrawCallCache.keys());
+
+    for (const id of hmCachedIds) {
+      if (!hmCurrentIds.has(id)) {
+        const dc = this.heightmapDrawCallCache.get(id)!;
+        dc.texture.destroy();
+        dc.uniformBuffer.destroy();
+        this.heightmapDrawCallCache.delete(id);
+      }
+    }
+
+    for (const obj of heightmapObjects) {
+      if (this.heightmapDrawCallCache.has(obj.id)) continue;
+      this.uploadHeightmapObject(obj, scene.palette);
+    }
+
+    this.heightmapDrawCalls = heightmapObjects
+      .map((obj) => this.heightmapDrawCallCache.get(obj.id)!)
+      .filter(Boolean);
+  }
+
+  private uploadHeightmapObject(obj: HeightmapObject, scenePalette: RGBA[]): void {
+    const [nx, nz] = obj.dims;
+
+    const texture = this.device.createTexture({
+      label: `heightmap_${obj.id}`,
+      size: { width: nx, height: nz },
+      mipLevelCount: 1,
+      sampleCount: 1,
+      dimension: '2d',
+      format: 'r8uint',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+
+    this.queue.writeTexture(
+      { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+      new Uint8Array(obj.heightmap),
+      { offset: 0, bytesPerRow: nx },
+      { width: nx, height: nz },
+    );
+
+    const textureView = texture.createView();
+    const sampler = this.device.createSampler({});
+
+    const uniformBuffer = this.device.createBuffer({
+      label: 'Heightmap Per Draw Uniform Buffer',
+      size: UNIFORM_SIZES.PER_DRAW,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const uniformData = new Float32Array(32);
+    uniformData.set(obj.modelMatrix, 0);
+    uniformData.set(obj.invModelMatrix, 16);
+    this.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+    const colorPalette = new Uint32Array(256);
+    const palette = obj.palette || scenePalette;
+    for (let i = 0; i < palette.length && i < 256; i++) {
+      colorPalette[i] = packRGBATuple(palette[i]);
+    }
+    this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+
+    const bindGroup = this.device.createBindGroup({
+      label: 'Heightmap Per Draw Bind Group',
+      layout: this.heightmapPerDrawBindGroupLayout,
+      entries: [
+        { binding: 0, resource: textureView },
+        { binding: 1, resource: { buffer: uniformBuffer } },
+      ],
+    });
+
+    this.heightmapDrawCallCache.set(obj.id, {
+      bindGroup,
+      texture,
+      textureView,
+      sampler,
+      uniformBuffer,
+    });
   }
 
   /** Upload static objects (only call once, these won't be re-uploaded) */

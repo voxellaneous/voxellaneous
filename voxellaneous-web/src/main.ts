@@ -166,6 +166,7 @@ async function initializeApp(): Promise<AppData> {
   renderer.uploadScene({
     palette: [],
     objects: terrainManager.getVisibleChunks(),
+    heightmapObjects: terrainManager.getVisibleHeightmapChunks(),
   });
 
   const markerVoxels = createUniformVoxelData(remoteMarkerSize, 0);
@@ -181,9 +182,11 @@ async function initializeApp(): Promise<AppData> {
       createRemoteMarkerObject(player.id, player.position, markerVoxels),
     );
     const terrainChunks = app.terrainManager!.getVisibleChunks();
+    const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
     renderer.uploadScene({
       palette: [],
       objects: [...terrainChunks, ...remoteObjects],
+      heightmapObjects: heightmapChunks,
     });
   };
 
@@ -207,6 +210,7 @@ async function initializeApp(): Promise<AppData> {
     const terrainChanged = app.terrainManager!.update(cameraModule.position);
     if (terrainChanged) {
       const terrainChunks = app.terrainManager!.getVisibleChunks();
+      const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
       const remotePlayers = network.getRemotePlayers();
       const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
         createRemoteMarkerObject(player.id, player.position, markerVoxels),
@@ -214,6 +218,7 @@ async function initializeApp(): Promise<AppData> {
       renderer.uploadScene({
         palette: [],
         objects: [...terrainChunks, ...remoteObjects],
+        heightmapObjects: heightmapChunks,
       });
     }
 

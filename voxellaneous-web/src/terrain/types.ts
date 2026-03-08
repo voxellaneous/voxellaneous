@@ -1,4 +1,4 @@
-import { VoxelObject } from '../scene';
+import { VoxelObject, HeightmapObject } from '../scene';
 
 /** Chunk coordinate in chunk-space (3D) */
 export interface ChunkCoord {
@@ -47,11 +47,16 @@ export interface TerrainConfig {
   heightScale: number;
 }
 
+/** Storage type for a terrain chunk */
+export type ChunkDataType = 'voxel' | 'heightmap';
+
 /** A loaded terrain chunk */
 export interface Chunk {
   coord: ChunkCoord;
   lod: number;
-  voxelObject: VoxelObject;
+  dataType: ChunkDataType;
+  voxelObject?: VoxelObject;
+  heightmapObject?: HeightmapObject;
   lastAccessed: number;
 }
 
@@ -92,7 +97,7 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   worldScale: 32,
   renderDistanceH: 12,
   renderDistanceV: 6,
-  lodLevels: [8, 16, 32, 64, 128, 256],
+  lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048],
   seed: 1812,
   noiseLayers: DEFAULT_NOISE_LAYERS,
   baseTerrainHeight: 0,

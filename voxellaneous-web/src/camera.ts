@@ -72,11 +72,26 @@ export class CameraModule {
 
     const aspectRatio = this.canvas.width / this.canvas.height;
     const projectionMatrix = mat4.create();
-    // Reverse-Z: swap near/far for better depth precision at distance
-    // Near objects get depth ~1.0, far objects get depth ~0.0
+    // Infinite reverse-Z: near→1, far(∞)→0. No far plane clipping.
     const near = 0.1;
-    const far = 10000.0;
-    mat4.perspectiveZO(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, far, near);
+    const f = 1.0 / Math.tan((90 * Math.PI / 180) / 2);
+    // Column-major: [col0, col1, col2, col3]
+    projectionMatrix[0]  = f / aspectRatio;
+    projectionMatrix[1]  = 0;
+    projectionMatrix[2]  = 0;
+    projectionMatrix[3]  = 0;
+    projectionMatrix[4]  = 0;
+    projectionMatrix[5]  = f;
+    projectionMatrix[6]  = 0;
+    projectionMatrix[7]  = 0;
+    projectionMatrix[8]  = 0;
+    projectionMatrix[9]  = 0;
+    projectionMatrix[10] = 0;
+    projectionMatrix[11] = -1;
+    projectionMatrix[12] = 0;
+    projectionMatrix[13] = 0;
+    projectionMatrix[14] = near;
+    projectionMatrix[15] = 0;
 
     const mvpMatrix = mat4.create();
     mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);

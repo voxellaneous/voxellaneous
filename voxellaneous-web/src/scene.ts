@@ -13,8 +13,22 @@ export interface VoxelObject {
   palette: RGBA[];  // Per-object palette
 }
 
+/** Heightmap-based terrain chunk: stores height per column instead of full 3D volume */
+export interface HeightmapObject {
+  id: string;
+  modelMatrix: mat4;
+  invModelMatrix: mat4;
+  /** [width, depth] of the heightmap (chunkSize x chunkSize) */
+  dims: [number, number];
+  /** Per-column height values (0 to chunkSize), layout: x + z * width */
+  heightmap: ByteArray;
+  palette: RGBA[];
+  paletteIndex: number;
+}
+
 /** Overall scene definition including a shared 4-color palette and list of voxel objects */
 export interface Scene {
   palette: RGBA[];
   objects: VoxelObject[];
+  heightmapObjects?: HeightmapObject[];
 }
