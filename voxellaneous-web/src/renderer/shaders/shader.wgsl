@@ -4,7 +4,7 @@ struct VertexInput {
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) obj_pos: vec3<f32>,   // object‑space position
+    @location(0) obj_pos: vec3<f32>,   // object-space position on bbox surface
 };
 
 struct PerFrameUniforms {
@@ -12,20 +12,16 @@ struct PerFrameUniforms {
     cam_pos_ws: vec3<f32>,
     _padding:   f32,
 };
-@group(1) @binding(0) var<uniform> u_frame: PerFrameUniforms;
-
-struct StaticUniforms {
-    palette: array<vec4<u32>, 64>,
-};
-@group(0) @binding(0) var<uniform> u_static: StaticUniforms;
+@group(0) @binding(0) var<uniform> u_frame: PerFrameUniforms;
 
 struct PerDrawUniforms {
     model_matrix:     mat4x4<f32>,
     inv_model_matrix: mat4x4<f32>,
+    palette:          array<vec4<u32>, 64>,
 };
-@group(2) @binding(1) var<uniform> u_draw: PerDrawUniforms;
+@group(1) @binding(1) var<uniform> u_draw: PerDrawUniforms;
 
-@group(2) @binding(0) var voxel_texture: texture_3d<u32>;
+@group(1) @binding(0) var voxel_texture: texture_3d<u32>;
 
 // G‑buffer outputs: albedo, normal, linear depth, and explicit fragment depth
 struct GBuffer {
@@ -40,18 +36,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let ws4 = u_draw.model_matrix * vec4<f32>(in.position, 1.0);
     out.position = u_frame.vp_matrix * ws4;
-    out.obj_pos  = in.position;
+    out.obj_pos = in.position;  // Pass object-space position directly
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> GBuffer {
+    // Transform camera position to object space
     let cam_os = (u_draw.inv_model_matrix * vec4<f32>(u_frame.cam_pos_ws, 1.0)).xyz;
+    // Ray direction from camera to this point on the bbox surface (in object space)
     let dir_os = normalize(in.obj_pos - cam_os);
 
     let dims = vec3<u32>(textureDimensions(voxel_texture, 0));
     let dims_f = vec3<f32>(dims);
-    let inv_dir = 1.0 / dir_os;
+    // Protect against division by zero for rays nearly parallel to axes
+    let eps = 1e-8;
+    let dir_sign = select(vec3<f32>(-1.0), vec3<f32>(1.0), dir_os >= vec3<f32>(0.0));
+    let safe_dir = select(dir_os, dir_sign * eps, abs(dir_os) < vec3<f32>(eps));
+    let inv_dir = 1.0 / safe_dir;
 
     let bounds_min = vec3<f32>(-0.5);
     let bounds_max = vec3<f32>(0.5);
@@ -66,13 +68,25 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     }
 
     var t = max(t_entry, 0.0);
-    let ray_start = cam_os + t * dir_os + vec3<f32>(0.5);
-    let offset = dir_os * (1.0 / dims_f);
-    let ray_voxel = ray_start * dims_f + offset;
+    // Small epsilon to nudge ray past entry point
+    let t_nudge = 1e-4;
+    let ray_start_os = cam_os + (t + t_nudge) * dir_os;
+    // Clamp to strictly inside bounds
+    let bound_eps = 1e-4;
+    let clamped_os = clamp(ray_start_os, vec3<f32>(-0.5 + bound_eps), vec3<f32>(0.5 - bound_eps));
+    // Convert to voxel space [0, dims) and clamp to valid range
+    var ray_voxel = (clamped_os + vec3<f32>(0.5)) * dims_f;
+    ray_voxel = clamp(ray_voxel, vec3<f32>(0.001), dims_f - vec3<f32>(0.001));
+    // Initial voxel
     var voxel = vec3<i32>(floor(ray_voxel));
-    let step = vec3<i32>(select(vec3<f32>(-1.0), vec3<f32>(1.0), dir_os > vec3<f32>(0.0)));
-    let next_boundary = select(floor(ray_voxel), vec3<f32>(ceil(ray_voxel)), dir_os > vec3<f32>(0.0));
-    let inv_dir_voxel = inv_dir / dims_f;
+    // Step direction: +1 or -1 based on ray direction (never 0)
+    let step = vec3<i32>(select(vec3<i32>(-1), vec3<i32>(1), dir_os >= vec3<f32>(0.0)));
+    // DDA in voxel space - use safe_dir to avoid division by zero
+    let dir_voxel = safe_dir * dims_f;
+    let inv_dir_voxel = 1.0 / dir_voxel;
+    // Compute distance to next voxel boundary for each axis
+    let voxel_f = vec3<f32>(voxel);
+    let next_boundary = select(voxel_f, voxel_f + 1.0, safe_dir >= vec3<f32>(0.0));
     var t_max = (next_boundary - ray_voxel) * inv_dir_voxel;
     let t_delta = abs(inv_dir_voxel);
 
@@ -137,16 +151,16 @@ fn fs_main(in: VertexOutput) -> GBuffer {
         discard;
     }
 
-    // Compute hit position from voxel coordinates (hit_t was in voxel-space units, not object-space!)
+    // Compute hit position from voxel coordinates
     // Convert hit_voxel [0, dims) to object space [-0.5, 0.5]
-    // hit_voxel is the voxel that was hit, hit_normal points outward from that voxel
+    // hit_normal points outward from the voxel face (toward camera)
     // Surface hit point = voxel center + 0.5 * voxel_size in normal direction
     let voxel_size = 1.0 / dims_f;
     let voxel_center_os = (vec3<f32>(hit_voxel) + 0.5) * voxel_size - vec3<f32>(0.5);
-    let hit_pos_os = voxel_center_os - hit_normal * 0.5 * voxel_size;
+    let hit_pos_os = voxel_center_os + hit_normal * 0.5 * voxel_size;
     let hit_pos_ws = (u_draw.model_matrix * vec4<f32>(hit_pos_os, 1.0)).xyz;
 
-    let packed = u_static.palette[hit_idx / 4u][hit_idx % 4u];
+    let packed = u_draw.palette[hit_idx / 4u][hit_idx % 4u];
     let albedo = unpack4x8unorm(packed);
 
     let linear_z = length(hit_pos_ws - u_frame.cam_pos_ws);

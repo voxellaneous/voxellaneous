@@ -1,1 +1,1 @@
-export class ByteArray extends Uint8Array<ArrayBuffer> {}
+export class ByteArray extends Uint8Array {}

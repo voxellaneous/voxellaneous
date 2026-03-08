@@ -38,9 +38,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let albedo = textureLoad(albedo_tex, coord, 0);
     let normal_encoded = textureLoad(normal_tex, coord, 0);
 
-    // Skip pixels with no geometry (normal = 0)
+    // Sky color for pixels with no geometry
     if all(normal_encoded.rgb == vec3<f32>(0.0)) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        return vec4<f32>(0.53, 0.81, 0.92, 1.0);
     }
 
     // Decode normal from [0,1] to [-1,1]

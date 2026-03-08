@@ -44,6 +44,7 @@ function addObjectToScene(scene: Scene, id: string, dims: vec3, translate: vec3,
     modelMatrix,
     invModelMatrix,
     voxels,
+    palette: [],
   });
 }
 
