@@ -49,17 +49,17 @@ export class Renderer {
   private vertexBuffer: GPUBuffer;
   private indexBuffer: GPUBuffer;
   private edgeIndexBuffer: GPUBuffer;
-  private staticUniformBuffer: GPUBuffer;
   private perFrameUniformBuffer: GPUBuffer;
   private lightingUniformBuffer: GPUBuffer;
 
-  // Bind groups
-  private staticBindGroup: GPUBindGroup;
-
   // Textures
+  private gbufferAlbedoTexture: GPUTexture;
   private gbufferAlbedo: GPUTextureView;
+  private gbufferNormalTexture: GPUTexture;
   private gbufferNormal: GPUTextureView;
+  private gbufferLinearZTexture: GPUTexture;
   private gbufferLinearZ: GPUTextureView;
+  private depthTexture: GPUTexture;
   private depthTextureView: GPUTextureView;
   private sampler: GPUSampler;
 
@@ -67,6 +67,12 @@ export class Renderer {
   private staticDrawCalls: DrawCallData[] = [];
   private dynamicDrawCalls: DrawCallData[] = [];
   private dynamicDrawCallCache: Map<string, DrawCallData> = new Map();
+
+  // Pre-allocated per-frame buffers
+  private perFrameData = new ArrayBuffer(UNIFORM_SIZES.PER_FRAME);
+  private perFrameView = new DataView(this.perFrameData);
+  private lightingData = new ArrayBuffer(UNIFORM_SIZES.LIGHTING);
+  private lightingView = new DataView(this.lightingData);
 
   // Heightmap pipeline and draw calls
   private heightmapPipeline!: GPURenderPipeline;
@@ -94,13 +100,15 @@ export class Renderer {
     vertexBuffer: GPUBuffer,
     indexBuffer: GPUBuffer,
     edgeIndexBuffer: GPUBuffer,
-    staticUniformBuffer: GPUBuffer,
     perFrameUniformBuffer: GPUBuffer,
     lightingUniformBuffer: GPUBuffer,
-    staticBindGroup: GPUBindGroup,
+    gbufferAlbedoTexture: GPUTexture,
     gbufferAlbedo: GPUTextureView,
+    gbufferNormalTexture: GPUTexture,
     gbufferNormal: GPUTextureView,
+    gbufferLinearZTexture: GPUTexture,
     gbufferLinearZ: GPUTextureView,
+    depthTexture: GPUTexture,
     depthTextureView: GPUTextureView,
     sampler: GPUSampler,
   ) {
@@ -123,13 +131,15 @@ export class Renderer {
     this.vertexBuffer = vertexBuffer;
     this.indexBuffer = indexBuffer;
     this.edgeIndexBuffer = edgeIndexBuffer;
-    this.staticUniformBuffer = staticUniformBuffer;
     this.perFrameUniformBuffer = perFrameUniformBuffer;
     this.lightingUniformBuffer = lightingUniformBuffer;
-    this.staticBindGroup = staticBindGroup;
+    this.gbufferAlbedoTexture = gbufferAlbedoTexture;
     this.gbufferAlbedo = gbufferAlbedo;
+    this.gbufferNormalTexture = gbufferNormalTexture;
     this.gbufferNormal = gbufferNormal;
+    this.gbufferLinearZTexture = gbufferLinearZTexture;
     this.gbufferLinearZ = gbufferLinearZ;
+    this.depthTexture = depthTexture;
     this.depthTextureView = depthTextureView;
     this.sampler = sampler;
   }
@@ -177,7 +187,7 @@ export class Renderer {
     const sampler = device.createSampler({});
 
     // Create depth texture
-    const depthTextureView = createDepthTexture(device, canvasWidth, canvasHeight);
+    const { texture: depthTexture, view: depthTextureView } = createDepthTexture(device, canvasWidth, canvasHeight);
 
     // Create shader modules
     const shader = device.createShaderModule({
@@ -210,12 +220,6 @@ export class Renderer {
     queue.writeBuffer(edgeIndexBuffer, 0, CUBE_EDGE_INDICES);
 
     // Create uniform buffers
-    const staticUniformBuffer = device.createBuffer({
-      label: 'Static Uniform Buffer',
-      size: UNIFORM_SIZES.STATIC,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
     const perFrameUniformBuffer = device.createBuffer({
       label: 'Per Frame Uniform Buffer',
       size: UNIFORM_SIZES.PER_FRAME,
@@ -229,17 +233,6 @@ export class Renderer {
     });
 
     // Create bind group layouts
-    const staticBindGroupLayout = device.createBindGroupLayout({
-      label: 'Static Bind Group Layout',
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: 'uniform' },
-        },
-      ],
-    });
-
     const perFrameBindGroupLayout = device.createBindGroupLayout({
       label: 'Per Frame Bind Group Layout',
       entries: [
@@ -266,18 +259,6 @@ export class Renderer {
           binding: 1,
           visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
           buffer: { type: 'uniform' },
-        },
-      ],
-    });
-
-    // Create static bind group
-    const staticBindGroup = device.createBindGroup({
-      label: 'Static Bind Group',
-      layout: staticBindGroupLayout,
-      entries: [
-        {
-          binding: 0,
-          resource: { buffer: staticUniformBuffer },
         },
       ],
     });
@@ -329,9 +310,9 @@ export class Renderer {
     });
 
     // Create G-buffer textures
-    const gbufferAlbedo = createRenderTextureView(device, canvasWidth, canvasHeight, 'rgba8unorm', 'GBuffer Albedo');
-    const gbufferNormal = createRenderTextureView(device, canvasWidth, canvasHeight, 'rgba8unorm', 'GBuffer Normal');
-    const gbufferLinearZ = createRenderTextureView(device, canvasWidth, canvasHeight, 'r16uint', 'GBuffer LinearZ');
+    const { texture: gbufferAlbedoTexture, view: gbufferAlbedo } = createRenderTexture(device, canvasWidth, canvasHeight, 'rgba8unorm', 'GBuffer Albedo');
+    const { texture: gbufferNormalTexture, view: gbufferNormal } = createRenderTexture(device, canvasWidth, canvasHeight, 'rgba8unorm', 'GBuffer Normal');
+    const { texture: gbufferLinearZTexture, view: gbufferLinearZ } = createRenderTexture(device, canvasWidth, canvasHeight, 'r16uint', 'GBuffer LinearZ');
 
     // Create quad pipelines
     const { layout: quadLayoutUint, pipeline: quadPipelineUint } = createFullscreenQuadPipeline(
@@ -574,13 +555,15 @@ export class Renderer {
       vertexBuffer,
       indexBuffer,
       edgeIndexBuffer,
-      staticUniformBuffer,
       perFrameUniformBuffer,
       lightingUniformBuffer,
-      staticBindGroup,
+      gbufferAlbedoTexture,
       gbufferAlbedo,
+      gbufferNormalTexture,
       gbufferNormal,
+      gbufferLinearZTexture,
       gbufferLinearZ,
+      depthTexture,
       depthTextureView,
       sampler,
     );
@@ -598,13 +581,29 @@ export class Renderer {
       alphaMode: 'opaque',
     });
 
+    // Destroy old textures
+    this.depthTexture.destroy();
+    this.gbufferAlbedoTexture.destroy();
+    this.gbufferNormalTexture.destroy();
+    this.gbufferLinearZTexture.destroy();
+
     // Recreate depth texture
-    this.depthTextureView = createDepthTexture(this.device, width, height);
+    const depth = createDepthTexture(this.device, width, height);
+    this.depthTexture = depth.texture;
+    this.depthTextureView = depth.view;
 
     // Recreate G-buffer textures
-    this.gbufferAlbedo = createRenderTextureView(this.device, width, height, 'rgba8unorm', 'GBuffer Albedo');
-    this.gbufferNormal = createRenderTextureView(this.device, width, height, 'rgba8unorm', 'GBuffer Normal');
-    this.gbufferLinearZ = createRenderTextureView(this.device, width, height, 'r16uint', 'GBuffer LinearZ');
+    const albedo = createRenderTexture(this.device, width, height, 'rgba8unorm', 'GBuffer Albedo');
+    this.gbufferAlbedoTexture = albedo.texture;
+    this.gbufferAlbedo = albedo.view;
+
+    const normal = createRenderTexture(this.device, width, height, 'rgba8unorm', 'GBuffer Normal');
+    this.gbufferNormalTexture = normal.texture;
+    this.gbufferNormal = normal.view;
+
+    const linearZ = createRenderTexture(this.device, width, height, 'r16uint', 'GBuffer LinearZ');
+    this.gbufferLinearZTexture = linearZ.texture;
+    this.gbufferLinearZ = linearZ.view;
   }
 
   render(
@@ -616,33 +615,24 @@ export class Renderer {
     lightIntensity: number,
     showBboxes: boolean,
   ): void {
-    // Update per-frame uniforms
-    const perFrameData = new ArrayBuffer(UNIFORM_SIZES.PER_FRAME);
-    const perFrameView = new DataView(perFrameData);
-
-    // Write vp_matrix (16 floats = 64 bytes)
+    // Update per-frame uniforms (reuse pre-allocated buffers)
     for (let i = 0; i < 16; i++) {
-      perFrameView.setFloat32(i * 4, vpMatrix[i], true);
+      this.perFrameView.setFloat32(i * 4, vpMatrix[i], true);
     }
-    // Write camera_position (3 floats = 12 bytes)
-    perFrameView.setFloat32(64, viewPosition[0], true);
-    perFrameView.setFloat32(68, viewPosition[1], true);
-    perFrameView.setFloat32(72, viewPosition[2], true);
-    // padding at offset 76 (4 bytes)
+    this.perFrameView.setFloat32(64, viewPosition[0], true);
+    this.perFrameView.setFloat32(68, viewPosition[1], true);
+    this.perFrameView.setFloat32(72, viewPosition[2], true);
 
-    this.queue.writeBuffer(this.perFrameUniformBuffer, 0, perFrameData);
+    this.queue.writeBuffer(this.perFrameUniformBuffer, 0, this.perFrameData);
 
-    // Update lighting uniforms
-    const lightingData = new ArrayBuffer(UNIFORM_SIZES.LIGHTING);
-    const lightingView = new DataView(lightingData);
-    lightingView.setFloat32(0, lightDir[0], true);
-    lightingView.setFloat32(4, lightDir[1], true);
-    lightingView.setFloat32(8, lightDir[2], true);
-    lightingView.setFloat32(12, ambient, true);
-    lightingView.setFloat32(16, lightIntensity, true);
-    // padding at offset 20 (12 bytes)
+    // Update lighting uniforms (reuse pre-allocated buffers)
+    this.lightingView.setFloat32(0, lightDir[0], true);
+    this.lightingView.setFloat32(4, lightDir[1], true);
+    this.lightingView.setFloat32(8, lightDir[2], true);
+    this.lightingView.setFloat32(12, ambient, true);
+    this.lightingView.setFloat32(16, lightIntensity, true);
 
-    this.queue.writeBuffer(this.lightingUniformBuffer, 0, lightingData);
+    this.queue.writeBuffer(this.lightingUniformBuffer, 0, this.lightingData);
 
     // Create per-frame bind group
     const perFrameBindGroup = this.device.createBindGroup({
@@ -851,6 +841,64 @@ export class Renderer {
     };
   }
 
+  private createPerDrawUniformBuffer(
+    modelMatrix: ArrayLike<number>,
+    invModelMatrix: ArrayLike<number>,
+    palette: RGBA[],
+    paletteIndex?: number,
+  ): GPUBuffer {
+    const uniformBuffer = this.device.createBuffer({
+      label: 'Per Draw Uniform Buffer',
+      size: UNIFORM_SIZES.PER_DRAW,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const uniformData = new Float32Array(32);
+    uniformData.set(modelMatrix, 0);
+    uniformData.set(invModelMatrix, 16);
+    this.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+    const colorPalette = new Uint32Array(256);
+    for (let i = 0; i < palette.length && i < 256; i++) {
+      colorPalette[i] = packRGBATuple(palette[i]);
+    }
+    this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+
+    if (paletteIndex !== undefined) {
+      this.queue.writeBuffer(uniformBuffer, 1152, new Uint32Array([paletteIndex]));
+    }
+
+    return uniformBuffer;
+  }
+
+  private createObjectTexture(
+    label: string,
+    dims: { width: number; height: number; depthOrArrayLayers?: number },
+    data: ArrayLike<number>,
+    dimension: GPUTextureDimension,
+  ): { texture: GPUTexture; view: GPUTextureView } {
+    const texture = this.device.createTexture({
+      label,
+      size: dims,
+      mipLevelCount: 1,
+      sampleCount: 1,
+      dimension,
+      format: 'r8uint',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+
+    const bytesPerRow = dims.width;
+    const rowsPerImage = dimension === '3d' ? dims.height : undefined;
+    this.queue.writeTexture(
+      { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+      new Uint8Array(data),
+      { offset: 0, bytesPerRow, ...(rowsPerImage !== undefined && { rowsPerImage }) },
+      dims,
+    );
+
+    return { texture, view: texture.createView() };
+  }
+
   uploadScene(scene: Scene): void {
     const currentIds = new Set(scene.objects.map((o) => o.id));
     const cachedIds = new Set(this.dynamicDrawCallCache.keys());
@@ -872,43 +920,15 @@ export class Renderer {
       const dims = Array.isArray(obj.dims) ? obj.dims : [obj.dims[0], obj.dims[1], obj.dims[2]];
       const [nx, ny, nz] = dims;
 
-      const texture = this.device.createTexture({
-        label: `object_${obj.id}`,
-        size: { width: nx, height: ny, depthOrArrayLayers: nz },
-        mipLevelCount: 1,
-        sampleCount: 1,
-        dimension: '3d',
-        format: 'r8uint',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-
-      this.queue.writeTexture(
-        { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
-        new Uint8Array(obj.voxels),
-        { offset: 0, bytesPerRow: nx, rowsPerImage: ny },
+      const { texture, view: textureView } = this.createObjectTexture(
+        `object_${obj.id}`,
         { width: nx, height: ny, depthOrArrayLayers: nz },
+        obj.voxels,
+        '3d',
       );
 
-      const textureView = texture.createView();
-      const sampler = this.device.createSampler({});
-
-      const uniformBuffer = this.device.createBuffer({
-        label: 'Per Draw Uniform Buffer',
-        size: UNIFORM_SIZES.PER_DRAW,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-
-      const uniformData = new Float32Array(32);
-      uniformData.set(obj.modelMatrix, 0);
-      uniformData.set(obj.invModelMatrix, 16);
-      this.queue.writeBuffer(uniformBuffer, 0, uniformData);
-
-      const colorPalette = new Uint32Array(256);
       const palette = obj.palette || scene.palette;
-      for (let i = 0; i < palette.length && i < 256; i++) {
-        colorPalette[i] = packRGBATuple(palette[i]);
-      }
-      this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+      const uniformBuffer = this.createPerDrawUniformBuffer(obj.modelMatrix, obj.invModelMatrix, palette);
 
       const bindGroup = this.device.createBindGroup({
         label: 'Per Draw Call Bind Group',
@@ -923,7 +943,6 @@ export class Renderer {
         bindGroup,
         texture,
         textureView,
-        sampler,
         uniformBuffer,
       });
     }
@@ -960,43 +979,17 @@ export class Renderer {
   private uploadHeightmapObject(obj: HeightmapObject, scenePalette: RGBA[]): void {
     const [nx, nz] = obj.dims;
 
-    const texture = this.device.createTexture({
-      label: `heightmap_${obj.id}`,
-      size: { width: nx, height: nz },
-      mipLevelCount: 1,
-      sampleCount: 1,
-      dimension: '2d',
-      format: 'r8uint',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-
-    this.queue.writeTexture(
-      { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
-      new Uint8Array(obj.heightmap),
-      { offset: 0, bytesPerRow: nx },
+    const { texture, view: textureView } = this.createObjectTexture(
+      `heightmap_${obj.id}`,
       { width: nx, height: nz },
+      obj.heightmap,
+      '2d',
     );
 
-    const textureView = texture.createView();
-    const sampler = this.device.createSampler({});
-
-    const uniformBuffer = this.device.createBuffer({
-      label: 'Heightmap Per Draw Uniform Buffer',
-      size: UNIFORM_SIZES.PER_DRAW,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    const uniformData = new Float32Array(32);
-    uniformData.set(obj.modelMatrix, 0);
-    uniformData.set(obj.invModelMatrix, 16);
-    this.queue.writeBuffer(uniformBuffer, 0, uniformData);
-
-    const colorPalette = new Uint32Array(256);
     const palette = obj.palette || scenePalette;
-    for (let i = 0; i < palette.length && i < 256; i++) {
-      colorPalette[i] = packRGBATuple(palette[i]);
-    }
-    this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+    const uniformBuffer = this.createPerDrawUniformBuffer(
+      obj.modelMatrix, obj.invModelMatrix, palette, obj.paletteIndex,
+    );
 
     const bindGroup = this.device.createBindGroup({
       label: 'Heightmap Per Draw Bind Group',
@@ -1011,7 +1004,6 @@ export class Renderer {
       bindGroup,
       texture,
       textureView,
-      sampler,
       uniformBuffer,
     });
   }
@@ -1024,43 +1016,15 @@ export class Renderer {
       const dims = Array.isArray(obj.dims) ? obj.dims : [obj.dims[0], obj.dims[1], obj.dims[2]];
       const [nx, ny, nz] = dims;
 
-      const texture = this.device.createTexture({
-        label: `static_${obj.id}`,
-        size: { width: nx, height: ny, depthOrArrayLayers: nz },
-        mipLevelCount: 1,
-        sampleCount: 1,
-        dimension: '3d',
-        format: 'r8uint',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-
-      this.queue.writeTexture(
-        { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
-        new Uint8Array(obj.voxels),
-        { offset: 0, bytesPerRow: nx, rowsPerImage: ny },
+      const { texture, view: textureView } = this.createObjectTexture(
+        `static_${obj.id}`,
         { width: nx, height: ny, depthOrArrayLayers: nz },
+        obj.voxels,
+        '3d',
       );
 
-      const textureView = texture.createView();
-      const sampler = this.device.createSampler({});
-
-      const uniformBuffer = this.device.createBuffer({
-        label: 'Static Uniform Buffer',
-        size: UNIFORM_SIZES.PER_DRAW,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-
-      const uniformData = new Float32Array(32);
-      uniformData.set(obj.modelMatrix, 0);
-      uniformData.set(obj.invModelMatrix, 16);
-      this.queue.writeBuffer(uniformBuffer, 0, uniformData);
-
-      const colorPalette = new Uint32Array(256);
       const palette = obj.palette || defaultPalette;
-      for (let i = 0; i < palette.length && i < 256; i++) {
-        colorPalette[i] = packRGBATuple(palette[i]);
-      }
-      this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
+      const uniformBuffer = this.createPerDrawUniformBuffer(obj.modelMatrix, obj.invModelMatrix, palette);
 
       const bindGroup = this.device.createBindGroup({
         label: 'Static Bind Group',
@@ -1075,7 +1039,6 @@ export class Renderer {
         bindGroup,
         texture,
         textureView,
-        sampler,
         uniformBuffer,
       });
     }
@@ -1086,13 +1049,13 @@ export class Renderer {
 
 // Helper functions
 
-function createRenderTextureView(
+function createRenderTexture(
   device: GPUDevice,
   width: number,
   height: number,
   format: GPUTextureFormat,
   label: string,
-): GPUTextureView {
+): { texture: GPUTexture; view: GPUTextureView } {
   const texture = device.createTexture({
     label,
     size: { width, height, depthOrArrayLayers: 1 },
@@ -1102,10 +1065,10 @@ function createRenderTextureView(
     format,
     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
   });
-  return texture.createView();
+  return { texture, view: texture.createView() };
 }
 
-function createDepthTexture(device: GPUDevice, width: number, height: number): GPUTextureView {
+function createDepthTexture(device: GPUDevice, width: number, height: number): { texture: GPUTexture; view: GPUTextureView } {
   const texture = device.createTexture({
     label: 'Depth Texture',
     size: { width, height, depthOrArrayLayers: 1 },
@@ -1115,7 +1078,7 @@ function createDepthTexture(device: GPUDevice, width: number, height: number): G
     format: 'depth24plus-stencil8',
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
-  return texture.createView();
+  return { texture, view: texture.createView() };
 }
 
 function createFullscreenQuadPipeline(

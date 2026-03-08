@@ -103,7 +103,8 @@ function initializeTerrainControls(pane: Pane, app: AppData): void {
       app.terrainManager.update(app.cameraModule.position);
       app.renderer.uploadScene({
         palette: [],
-        objects: app.terrainManager.getVisibleChunks(),
+        objects: [],
+        heightmapObjects: app.terrainManager.getVisibleHeightmapChunks(),
       });
     }
   });

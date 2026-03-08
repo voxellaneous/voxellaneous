@@ -48,7 +48,6 @@ export interface DrawCallData {
   bindGroup: GPUBindGroup;
   texture: GPUTexture;
   textureView: GPUTextureView;
-  sampler: GPUSampler;
   uniformBuffer: GPUBuffer;
 }
 
@@ -68,7 +67,6 @@ export interface GPUAdapterInfo {
 // Uniform buffer sizes in bytes
 export const UNIFORM_SIZES = {
   PER_FRAME: 80,
-  STATIC: 1024,
-  PER_DRAW: 1152,  // 128 (matrices) + 1024 (palette)
+  PER_DRAW: 1168,  // 128 (matrices) + 1024 (palette) + 16 (palette_index, aligned)
   LIGHTING: 32,
 } as const;

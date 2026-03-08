@@ -1,4 +1,4 @@
-import { VoxelObject, HeightmapObject } from '../scene';
+import { HeightmapObject } from '../scene';
 
 /** Chunk coordinate in chunk-space (3D) */
 export interface ChunkCoord {
@@ -31,10 +31,6 @@ export interface TerrainConfig {
   chunkSize: number;
   /** World units per chunk */
   worldScale: number;
-  /** Horizontal render distance in chunks */
-  renderDistanceH: number;
-  /** Vertical render distance in chunks (up and down from camera) */
-  renderDistanceV: number;
   /** LOD levels: render distance per level */
   lodLevels: number[];
   /** Base seed for noise generation */
@@ -47,15 +43,10 @@ export interface TerrainConfig {
   heightScale: number;
 }
 
-/** Storage type for a terrain chunk */
-export type ChunkDataType = 'voxel' | 'heightmap';
-
 /** A loaded terrain chunk */
 export interface Chunk {
   coord: ChunkCoord;
   lod: number;
-  dataType: ChunkDataType;
-  voxelObject?: VoxelObject;
   heightmapObject?: HeightmapObject;
   lastAccessed: number;
 }
@@ -95,8 +86,6 @@ export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   chunkSize: 32,
   worldScale: 32,
-  renderDistanceH: 12,
-  renderDistanceV: 6,
   lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048],
   seed: 1812,
   noiseLayers: DEFAULT_NOISE_LAYERS,

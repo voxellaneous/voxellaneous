@@ -121,7 +121,6 @@ export interface WorkerInitMessage {
 
 export interface WorkerGenerateMessage {
   type: 'generate';
-  id: string;
   x: number;
   z: number;
   lod: number;
@@ -132,7 +131,6 @@ export type WorkerMessage = WorkerInitMessage | WorkerGenerateMessage;
 
 export interface WorkerResultMessage {
   type: 'result';
-  id: string;
   x: number;
   z: number;
   /** Y chunk coordinate computed from terrain height sampling (for ID) */
@@ -169,7 +167,6 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
 
     const response: WorkerResultMessage = {
       type: 'result',
-      id: msg.id,
       x: msg.x,
       z: msg.z,
       chunkY,

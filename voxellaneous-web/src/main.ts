@@ -4,7 +4,7 @@ import './style.css';
 import { Renderer } from './renderer';
 import { initializeDevTools } from './editor';
 import { importFromBinary, createSceneFromResult } from './converter';
-import { Scene, VoxelObject, RGBA } from './scene';
+import { VoxelObject, RGBA } from './scene';
 import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
@@ -13,6 +13,9 @@ import { ByteArray } from './common/types';
 import { ChunkManager } from './terrain';
 
 const remoteMarkerSize = 4;
+const reusableMvp = new Float32Array(16);
+const reusableCamPos = new Float32Array(3);
+const reusableLightDir = new Float32Array(3);
 const markerPalette: RGBA[] = [
   [0, 0, 0, 0], // Index 0: empty
   [255, 0, 0, 255], // Index 1: red marker
@@ -20,7 +23,7 @@ const markerPalette: RGBA[] = [
 
 function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
   const total = size * size * size;
-  const voxels = new ByteArray(new ArrayBuffer(total));
+  const voxels = new ByteArray(total);
   voxels.fill(paletteIndex);
   return voxels;
 }
@@ -165,11 +168,11 @@ async function initializeApp(): Promise<AppData> {
   terrainManager.update(cameraModule.position);
   renderer.uploadScene({
     palette: [],
-    objects: terrainManager.getVisibleChunks(),
+    objects: [],
     heightmapObjects: terrainManager.getVisibleHeightmapChunks(),
   });
 
-  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 0);
+  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 1);
 
   let lastRemoteSignature = '';
   const updateRemoteScene = () => {
@@ -181,11 +184,10 @@ async function initializeApp(): Promise<AppData> {
     const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
       createRemoteMarkerObject(player.id, player.position, markerVoxels),
     );
-    const terrainChunks = app.terrainManager!.getVisibleChunks();
     const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
     renderer.uploadScene({
       palette: [],
-      objects: [...terrainChunks, ...remoteObjects],
+      objects: remoteObjects,
       heightmapObjects: heightmapChunks,
     });
   };
@@ -209,7 +211,6 @@ async function initializeApp(): Promise<AppData> {
     // Update terrain chunks based on camera position
     const terrainChanged = app.terrainManager!.update(cameraModule.position);
     if (terrainChanged) {
-      const terrainChunks = app.terrainManager!.getVisibleChunks();
       const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
       const remotePlayers = network.getRemotePlayers();
       const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
@@ -217,19 +218,23 @@ async function initializeApp(): Promise<AppData> {
       );
       renderer.uploadScene({
         palette: [],
-        objects: [...terrainChunks, ...remoteObjects],
+        objects: remoteObjects,
         heightmapObjects: heightmapChunks,
       });
     }
 
     const mvpMatrix = cameraModule.calculateMVP();
+    reusableMvp.set(mvpMatrix);
+    reusableCamPos.set(cameraModule.position);
+    reusableLightDir[0] = app.lightDir.x;
+    reusableLightDir[1] = app.lightDir.y;
+    reusableLightDir[2] = app.lightDir.z;
 
-    const lightDirArray = new Float32Array([app.lightDir.x, app.lightDir.y, app.lightDir.z]);
     renderer.render(
-      new Float32Array(mvpMatrix),
-      new Float32Array(cameraModule.position),
+      reusableMvp,
+      reusableCamPos,
       app.presentTarget,
-      lightDirArray,
+      reusableLightDir,
       app.ambient,
       app.lightIntensity,
       app.showBboxes,

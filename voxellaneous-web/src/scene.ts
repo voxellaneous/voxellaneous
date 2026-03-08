@@ -21,7 +21,7 @@ export interface HeightmapObject {
   /** [width, depth] of the heightmap (chunkSize x chunkSize) */
   dims: [number, number];
   /** Per-column height values (0 to chunkSize), layout: x + z * width */
-  heightmap: ByteArray;
+  heightmap: Uint8Array;
   palette: RGBA[];
   paletteIndex: number;
 }

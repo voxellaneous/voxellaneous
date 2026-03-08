@@ -18,6 +18,7 @@ struct PerDrawUniforms {
     model_matrix:     mat4x4<f32>,
     inv_model_matrix: mat4x4<f32>,
     palette:          array<vec4<u32>, 64>,
+    palette_index:    u32,
 };
 @group(1) @binding(1) var<uniform> u_draw: PerDrawUniforms;
 
@@ -180,8 +181,8 @@ fn fs_main(in: VertexOutput) -> GBuffer {
 
     let hit_pos_ws = (u_draw.model_matrix * vec4<f32>(hit_pos_os, 1.0)).xyz;
 
-    // Use palette index 1 (grass) - stored in palette[0][1]
-    let packed = u_draw.palette[0u][1u];
+    let idx = u_draw.palette_index;
+    let packed = u_draw.palette[idx / 4u][idx % 4u];
     let albedo = unpack4x8unorm(packed);
 
     let linear_z = length(hit_pos_ws - u_frame.cam_pos_ws);

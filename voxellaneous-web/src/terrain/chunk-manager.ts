@@ -1,5 +1,6 @@
-import { vec3, mat4 } from 'gl-matrix';
-import { VoxelObject, HeightmapObject } from '../scene';
+import { mat4 } from 'gl-matrix';
+import type { vec3 } from 'gl-matrix';
+import { HeightmapObject } from '../scene';
 import { TERRAIN_PALETTE } from './chunk';
 import { Chunk, ChunkCoord, TerrainConfig, DEFAULT_TERRAIN_CONFIG, chunkKey } from './types';
 import type { WorkerMessage, WorkerResultMessage } from './terrain-worker';
@@ -23,7 +24,6 @@ export class ChunkManager {
   private lastPlayerPosition: vec3 | null = null;
   private chunksChanged = true;
   private grassPaletteIndex = 1;
-  private requestId = 0;
 
   constructor(config: Partial<TerrainConfig> = {}) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config };
@@ -59,7 +59,6 @@ export class ChunkManager {
     const chunk: Chunk = {
       coord,
       lod: msg.lod,
-      dataType: 'heightmap',
       heightmapObject,
       lastAccessed: Date.now(),
     };
@@ -95,33 +94,6 @@ export class ChunkManager {
       heightmap,
       palette: TERRAIN_PALETTE,
       paletteIndex,
-    };
-  }
-
-  private createVoxelObject(coord: ChunkCoord, voxels: Uint8Array, lod: number, lodChunkSize: number): VoxelObject {
-    const { worldScale } = this.config;
-
-    const lodScale = Math.pow(2, lod);
-    const lodWorldScale = worldScale * lodScale;
-
-    const worldX = coord.x * lodWorldScale;
-    const worldY = coord.y * lodWorldScale;
-    const worldZ = coord.z * lodWorldScale;
-
-    const modelMatrix = mat4.create();
-    mat4.translate(modelMatrix, modelMatrix, [worldX, worldY, worldZ]);
-    mat4.scale(modelMatrix, modelMatrix, [lodWorldScale, lodWorldScale, lodWorldScale]);
-
-    const invModelMatrix = mat4.create();
-    mat4.invert(invModelMatrix, modelMatrix);
-
-    return {
-      id: `terrain_${chunkKey(coord)}_lod${lod}`,
-      modelMatrix,
-      invModelMatrix,
-      dims: vec3.fromValues(lodChunkSize, lodChunkSize, lodChunkSize),
-      voxels,
-      palette: TERRAIN_PALETTE,
     };
   }
 
@@ -175,7 +147,6 @@ export class ChunkManager {
 
     const msg: WorkerMessage = {
       type: 'generate',
-      id: `${this.requestId++}`,
       x,
       z,
       lod,
@@ -280,7 +251,7 @@ export class ChunkManager {
       const playerLodChunkX = Math.floor(playerWorldX / lodWorldScale);
       const playerLodChunkZ = Math.floor(playerWorldZ / lodWorldScale);
 
-      const radiusInLod = Math.ceil(maxWorldDist / lodWorldScale) + 1;
+      const radiusInLod = Math.min(Math.ceil(maxWorldDist / lodWorldScale) + 1, 32);
 
       for (let dx = -radiusInLod; dx <= radiusInLod; dx++) {
         for (let dz = -radiusInLod; dz <= radiusInLod; dz++) {
@@ -304,6 +275,8 @@ export class ChunkManager {
       }
     }
 
+    if (candidates.length === 0) return;
+
     // Sort by priority (LOD 0 first, then by horizontal distance)
     candidates.sort((a, b) => a.dist - b.dist);
 
@@ -324,16 +297,14 @@ export class ChunkManager {
     }
   }
 
-  getVisibleChunks(): VoxelObject[] {
-    return Array.from(this.chunks.values())
-      .filter((c) => c.dataType === 'voxel' && c.voxelObject)
-      .map((c) => c.voxelObject!);
-  }
-
   getVisibleHeightmapChunks(): HeightmapObject[] {
-    return Array.from(this.chunks.values())
-      .filter((c) => c.dataType === 'heightmap' && c.heightmapObject)
-      .map((c) => c.heightmapObject!);
+    const result: HeightmapObject[] = [];
+    for (const chunk of this.chunks.values()) {
+      if (chunk.heightmapObject) {
+        result.push(chunk.heightmapObject);
+      }
+    }
+    return result;
   }
 
   getLoadedChunkCount(): number {
