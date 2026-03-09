@@ -45,10 +45,14 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     let cam_os = (u_draw.inv_model_matrix * vec4<f32>(u_frame.cam_pos_ws, 1.0)).xyz;
     let dir_os = normalize(in.obj_pos - cam_os);
 
-    // Heightmap is NxN, chunk is NxNxN (cubic)
+    // Heightmap is NxN; Y extent may differ from XZ (non-cubic bounding box).
+    // Derive ratio from model matrix so texel heights map to shader Y space.
     let hm_dims = textureDimensions(heightmap_texture, 0);
     let chunk_size = f32(hm_dims.x);
     let dims_f = vec3<f32>(chunk_size);
+    let scale_xz = length(u_draw.model_matrix[0].xyz);
+    let scale_y  = length(u_draw.model_matrix[1].xyz);
+    let y_ratio  = scale_xz / scale_y; // chunk_size / numYVoxels
 
     let eps = 1e-8;
     let dir_sign = select(vec3<f32>(-1.0), vec3<f32>(1.0), dir_os >= vec3<f32>(0.0));
@@ -119,7 +123,8 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             break;
         }
 
-        let h = f32(textureLoad(heightmap_texture, vec2<u32>(u32(voxel_x), u32(voxel_z)), 0).r) / 255.0 * chunk_size;
+        // Texel = integer voxel height; scale to shader Y space [0, chunk_size]
+        let h = f32(textureLoad(heightmap_texture, vec2<u32>(u32(voxel_x), u32(voxel_z)), 0).r) * y_ratio;
         let t_col_exit = min(t_max_x, t_max_z);
 
         if h > 0.0 {

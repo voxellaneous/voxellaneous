@@ -96,18 +96,19 @@ function generateColumnHeightmap(
     }
   }
 
-  // Non-cubic Y: fits exact height range with padding.
-  // Uses full [0,255] range for sub-voxel precision.
-  const padding = voxelSize;
-  const minWorldY = minHeight - padding;
-  const worldYExtent = Math.max(maxHeight - minHeight + 2 * padding, voxelSize);
+  // Snap to global voxel grid: minWorldY on grid, Y-voxel = voxelSize.
+  // worldYExtent grows to fit actual range (not clamped to lodWorldScale).
+  // Edge alignment guaranteed: round(worldH / voxelSize) is chunk-independent.
+  const minWorldY = Math.floor(minHeight / voxelSize) * voxelSize - voxelSize;
+  const numYVoxels = Math.ceil((maxHeight - minWorldY) / voxelSize) + 1;
+  const worldYExtent = numYVoxels * voxelSize;
   const chunkY = Math.floor(minHeight / lodWorldScale);
 
-  // Encode height as fraction of worldYExtent → [0, 255]
+  // Encode: voxel count from minWorldY (each voxel = voxelSize tall)
   const heightmap = new Uint8Array(chunkSize * chunkSize);
   for (let i = 0; i < chunkSize * chunkSize; i++) {
-    const frac = (heights[i] - minWorldY) / worldYExtent;
-    heightmap[i] = Math.max(0, Math.min(255, Math.round(frac * 255)));
+    const voxelH = Math.round((heights[i] - minWorldY) / voxelSize);
+    heightmap[i] = Math.max(0, Math.min(255, voxelH));
   }
 
   return { heightmap, chunkY, minWorldY, worldYExtent };

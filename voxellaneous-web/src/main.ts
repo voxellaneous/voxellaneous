@@ -118,7 +118,7 @@ async function initializeApp(): Promise<AppData> {
     renderer,
     canvas,
     presentTarget: 4, // Default to Lit mode
-    lightDir: { x: 0.22, y: 0.22, z: 0.56 },
+    lightDir: { x: 0.3, y: 0.55, z: 0.77 },
     ambient: 0.3,
     lightIntensity: 1.0,
     showBboxes: false,
