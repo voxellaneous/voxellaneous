@@ -14,23 +14,27 @@ export function initializeDevTools(app: AppData, profilerData: ProfilerData): vo
 }
 
 function initializeCameraControls(pane: Pane, app: AppData): void {
-  const folder = pane.addFolder({ title: 'Camera' });
+  if (app.cameraModule) {
+    const folder = pane.addFolder({ title: 'Camera' });
 
-  folder.addBinding(app, 'cameraSpeed', {
-    label: 'Speed',
-    min: 0.1,
-    max: 10,
-    step: 0.1,
-  }).on('change', (ev) => {
-    app.cameraModule?.setSpeed(ev.value);
-  });
+    folder
+      .addBinding(app, 'cameraSpeed', {
+        label: 'Speed',
+        min: 0.1,
+        max: 10,
+        step: 0.1,
+      })
+      .on('change', (ev) => {
+        app.cameraModule?.setSpeed(ev.value);
+      });
+  }
 }
 
 function initializeTerrainControls(pane: Pane, app: AppData): void {
   if (!app.terrainManager) return;
 
   const config = app.terrainManager.getConfig();
-  const folder = pane.addFolder({ title: 'Terrain' });
+  const folder = pane.addFolder({ title: 'Terrain', expanded: false });
 
   const params = {
     seed: config.seed,
@@ -60,7 +64,7 @@ function initializeTerrainControls(pane: Pane, app: AppData): void {
   });
 
   // Create a deep copy of noise layers for editing
-  const noiseLayers: NoiseLayer[] = config.noiseLayers.map(layer => ({ ...layer }));
+  const noiseLayers: NoiseLayer[] = config.noiseLayers.map((layer) => ({ ...layer }));
 
   // Add controls for each noise layer (Mountains, Hills, Details)
   for (let i = 0; i < noiseLayers.length; i++) {

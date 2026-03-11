@@ -70,39 +70,52 @@ export class CameraModule {
     return document.pointerLockElement === this.canvas;
   }
 
-  calculateMVP(): mat4 {
-    const viewMatrix = mat4.create();
+  private buildViewAndProjection(): { view: mat4; projection: mat4 } {
+    const view = mat4.create();
     const cameraTarget: vec3 = [0, 0, 0];
     vec3.add(cameraTarget, this.camera.position, this.camera.direction);
-    mat4.lookAt(viewMatrix, this.camera.position, cameraTarget, this.camera.up);
+    mat4.lookAt(view, this.camera.position, cameraTarget, this.camera.up);
 
     const aspectRatio = this.canvas.width / this.canvas.height;
-    const projectionMatrix = mat4.create();
+    const projection = mat4.create();
     // Infinite reverse-Z: near→1, far(∞)→0. No far plane clipping.
     const near = 0.1;
     const f = 1.0 / Math.tan((90 * Math.PI / 180) / 2);
     // Column-major: [col0, col1, col2, col3]
-    projectionMatrix[0]  = f / aspectRatio;
-    projectionMatrix[1]  = 0;
-    projectionMatrix[2]  = 0;
-    projectionMatrix[3]  = 0;
-    projectionMatrix[4]  = 0;
-    projectionMatrix[5]  = f;
-    projectionMatrix[6]  = 0;
-    projectionMatrix[7]  = 0;
-    projectionMatrix[8]  = 0;
-    projectionMatrix[9]  = 0;
-    projectionMatrix[10] = 0;
-    projectionMatrix[11] = -1;
-    projectionMatrix[12] = 0;
-    projectionMatrix[13] = 0;
-    projectionMatrix[14] = near;
-    projectionMatrix[15] = 0;
+    projection[0]  = f / aspectRatio;
+    projection[1]  = 0;
+    projection[2]  = 0;
+    projection[3]  = 0;
+    projection[4]  = 0;
+    projection[5]  = f;
+    projection[6]  = 0;
+    projection[7]  = 0;
+    projection[8]  = 0;
+    projection[9]  = 0;
+    projection[10] = 0;
+    projection[11] = -1;
+    projection[12] = 0;
+    projection[13] = 0;
+    projection[14] = near;
+    projection[15] = 0;
 
+    return { view, projection };
+  }
+
+  calculateMVP(): mat4 {
+    const { view, projection } = this.buildViewAndProjection();
     const mvpMatrix = mat4.create();
-    mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
-
+    mat4.multiply(mvpMatrix, projection, view);
     return mvpMatrix;
+  }
+
+  getCameraMatrices(): { inverseView: mat4; inverseProjection: mat4 } {
+    const { view, projection } = this.buildViewAndProjection();
+    const inverseView = mat4.create();
+    mat4.invert(inverseView, view);
+    const inverseProjection = mat4.create();
+    mat4.invert(inverseProjection, projection);
+    return { inverseView, inverseProjection };
   }
 
   private handleMouseMove = (event: MouseEvent) => {

@@ -64,10 +64,15 @@ export type AppData = {
   renderer: Renderer;
   presentTarget: number;
   canvas: HTMLCanvasElement;
-  lightDir: { x: number; y: number; z: number };
+  sunTime: number;
+  sunAngle: number;
   ambient: number;
-  lightIntensity: number;
+  sunIlluminance: number;
+  sunDiskScale: number;
+  sunDiskSize: number;
   showBboxes: boolean;
+  fogDensity: number;
+  fogHeightFalloff: number;
   terrainManager?: ChunkManager;
   cameraModule?: CameraModule;
   cameraSpeed: number;
@@ -112,16 +117,21 @@ async function initializeApp(): Promise<AppData> {
   const renderer = await Renderer.new(canvas);
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
-  cameraModule.setPosition([-100, 80, -356]); // Above terrain level
+  cameraModule.setPosition([-100, 800, -356]); // Above terrain level
 
   const app: AppData = {
     renderer,
     canvas,
     presentTarget: 4, // Default to Lit mode
-    lightDir: { x: 0.3, y: 0.55, z: 0.77 },
-    ambient: 0.3,
-    lightIntensity: 1.0,
+    sunTime: 8,
+    sunAngle: 30,
+    ambient: 0.1,
+    sunIlluminance: 10,
+    sunDiskScale: 0.8,
+    sunDiskSize: 2, // 0.545,
     showBboxes: false,
+    fogDensity: 0.0005,
+    fogHeightFalloff: 0.005,
     cameraModule,
     cameraSpeed: cameraModule.speed,
   };
@@ -139,7 +149,7 @@ async function initializeApp(): Promise<AppData> {
       const result = await importFromBinary(file);
       const sponzaScene = createSceneFromResult(result);
       // Attach sponza palette and offset Y position
-      const sponzaYOffset = 510; // Move sponza down to terrain level
+      const sponzaYOffset = 1310; // Move sponza down to terrain level
       sponzaObjects = sponzaScene.objects.map((obj) => {
         const offsetMatrix = mat4.clone(obj.modelMatrix);
         offsetMatrix[13] += sponzaYOffset; // Add to Y translation
@@ -230,11 +240,17 @@ async function initializeApp(): Promise<AppData> {
     }
 
     const mvpMatrix = cameraModule.calculateMVP();
+    const { inverseView, inverseProjection } = cameraModule.getCameraMatrices();
     reusableMvp.set(mvpMatrix);
     reusableCamPos.set(cameraModule.position);
-    reusableLightDir[0] = app.lightDir.x;
-    reusableLightDir[1] = app.lightDir.y;
-    reusableLightDir[2] = app.lightDir.z;
+
+    // Compute sun direction from time of day + azimuth angle
+    const elevDeg = 90 * Math.sin(((app.sunTime - 6) / 12) * Math.PI);
+    const elevRad = (elevDeg * Math.PI) / 180;
+    const azimRad = (app.sunAngle * Math.PI) / 180;
+    reusableLightDir[0] = Math.cos(elevRad) * Math.sin(azimRad);
+    reusableLightDir[1] = Math.sin(elevRad);
+    reusableLightDir[2] = Math.cos(elevRad) * Math.cos(azimRad);
 
     renderer.render(
       reusableMvp,
@@ -242,8 +258,14 @@ async function initializeApp(): Promise<AppData> {
       app.presentTarget,
       reusableLightDir,
       app.ambient,
-      app.lightIntensity,
       app.showBboxes,
+      new Float32Array(inverseView),
+      new Float32Array(inverseProjection),
+      app.sunIlluminance,
+      app.sunDiskScale,
+      app.sunDiskSize,
+      app.fogDensity,
+      app.fogHeightFalloff,
     );
   };
   registerRecurringAnimation(render);

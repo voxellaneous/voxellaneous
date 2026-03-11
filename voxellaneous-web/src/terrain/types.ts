@@ -68,7 +68,7 @@ export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
     name: 'Hills',
     enabled: true,
     frequency: 0.0005,
-    amplitude: 0.4,
+    amplitude: 1,
     octaves: 2,
     persistence: 0.35,
     seedOffset: 1000,
@@ -77,7 +77,7 @@ export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
   {
     name: 'Details',
     enabled: true,
-    frequency: 0.004,
+    frequency: 0.01,
     amplitude: 0.03,
     octaves: 1,
     persistence: 0.3,
@@ -90,8 +90,8 @@ export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   chunkSize: 32,
   worldScale: 32,
-  lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048],
-  seed: 1812,
+  lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+  seed: 761,
   noiseLayers: DEFAULT_NOISE_LAYERS,
   baseTerrainHeight: 0,
   heightScale: 400,

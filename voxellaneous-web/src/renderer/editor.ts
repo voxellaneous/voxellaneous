@@ -28,24 +28,57 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     label: 'Show Bounding Boxes',
   });
 
-  const lightingFolder = pane.addFolder({ title: 'Lighting' });
-  lightingFolder.addBinding(app, 'lightDir', {
-    label: 'Light Direction',
-    x: { min: -1, max: 1, step: 0.01 },
-    y: { min: -1, max: 1, step: 0.01 },
-    z: { min: -1, max: 1, step: 0.01 },
+  const sunFolder = pane.addFolder({ title: 'Sun' });
+  sunFolder.addBinding(app, 'sunTime', {
+    label: 'Time of Day',
+    min: 0,
+    max: 24,
+    step: 0.01,
   });
-  lightingFolder.addBinding(app, 'ambient', {
+  sunFolder.addBinding(app, 'sunAngle', {
+    label: 'Azimuth (°)',
+    min: 0,
+    max: 360,
+    step: 1,
+  });
+  sunFolder.addBinding(app, 'sunIlluminance', {
+    label: 'Illuminance',
+    min: 0.1,
+    max: 50,
+    step: 0.5,
+  });
+  sunFolder.addBinding(app, 'sunDiskScale', {
+    label: 'Disk Brightness',
+    min: 0,
+    max: 10,
+    step: 0.1,
+  });
+  sunFolder.addBinding(app, 'sunDiskSize', {
+    label: 'Disk Size (°)',
+    min: 0.1,
+    max: 5,
+    step: 0.05,
+  });
+
+  sunFolder.addBinding(app, 'ambient', {
     label: 'Ambient',
     min: 0,
     max: 1,
     step: 0.01,
   });
-  lightingFolder.addBinding(app, 'lightIntensity', {
-    label: 'Light Intensity',
+
+  const fogFolder = pane.addFolder({ title: 'Fog' });
+  fogFolder.addBinding(app, 'fogDensity', {
+    label: 'Density',
     min: 0,
-    max: 3,
-    step: 0.1,
+    max: 0.05,
+    step: 0.00001,
+  });
+  fogFolder.addBinding(app, 'fogHeightFalloff', {
+    label: 'Height Falloff',
+    min: 0.0,
+    max: 1.0,
+    step: 0.0001,
   });
 
   const gpuData = app.renderer.get_gpu_info() as GPUData;
