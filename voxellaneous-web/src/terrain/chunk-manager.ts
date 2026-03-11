@@ -5,9 +5,29 @@ import { TERRAIN_PALETTE } from './chunk';
 import { Chunk, ChunkCoord, TerrainConfig, DEFAULT_TERRAIN_CONFIG, chunkKey } from './types';
 import type { WorkerMessage, WorkerResultMessage } from './terrain-worker';
 
-/** Key for a terrain column: (x, z) at a specific LOD — no Y */
-function columnLodKey(x: number, z: number, lod: number): string {
-  return `${x},${z},lod${lod}`;
+/**
+ * Numeric key for a terrain column: (x, z) at a specific LOD.
+ * Packs into a single safe integer (46 bits of 53 available).
+ * Layout: [x+offset 21 bits][z+offset 21 bits][lod 4 bits]
+ */
+const COORD_OFFSET = 1 << 20;  // 1048576 — supports coords ±1048576
+const COORD_RANGE = 1 << 21;   // 2097152
+const LOD_RANGE = 16;
+
+function columnLodKey(x: number, z: number, lod: number): number {
+  return ((x + COORD_OFFSET) * COORD_RANGE + (z + COORD_OFFSET)) * LOD_RANGE + lod;
+}
+
+function lodFromKey(key: number): number {
+  return key % LOD_RANGE;
+}
+
+function keyToString(key: number): string {
+  const lod = key % LOD_RANGE;
+  const rest = (key - lod) / LOD_RANGE;
+  const z = (rest % COORD_RANGE) - COORD_OFFSET;
+  const x = ((rest - (z + COORD_OFFSET)) / COORD_RANGE) - COORD_OFFSET;
+  return `(${x},${z},lod${lod})`;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -15,15 +35,16 @@ const MAX_PENDING_REQUESTS = 64;
 export class ChunkManager {
   private config: TerrainConfig;
   private worker: Worker;
-  private chunks: Map<string, Chunk> = new Map();
-  private pendingChunks: Set<string> = new Set();
+  private chunks: Map<number, Chunk> = new Map();
+  private pendingChunks: Set<number> = new Set();
   /** Permanent cache of generated chunk data — never regenerate from noise */
-  private chunkCache: Map<string, WorkerResultMessage> = new Map();
+  private chunkCache: Map<number, WorkerResultMessage> = new Map();
   private lastPlayerChunkX: number | null = null;
   private lastPlayerChunkZ: number | null = null;
   private lastPlayerPosition: vec3 | null = null;
   private chunksChanged = true;
-  private grassPaletteIndex = 1;
+  private _gapDetectEnabled = false;
+  private _frameNum = 0;
 
   constructor(config: Partial<TerrainConfig> = {}) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config };
@@ -50,10 +71,10 @@ export class ChunkManager {
   }
 
   /** Create a visible Chunk from cached worker data */
-  private materializeFromCache(key: string, msg: WorkerResultMessage): void {
+  private materializeFromCache(key: number, msg: WorkerResultMessage): void {
     const coord: ChunkCoord = { x: msg.x, y: msg.chunkY, z: msg.z };
     const heightmapObject = this.createHeightmapObject(
-      coord, msg.heightmap, msg.lod, msg.lodChunkSize, msg.grassPaletteIndex,
+      coord, msg.heightmap, msg.lod, msg.lodChunkSize,
       msg.minWorldY, msg.worldYExtent,
     );
     const chunk: Chunk = {
@@ -67,7 +88,7 @@ export class ChunkManager {
   }
 
   private createHeightmapObject(
-    coord: ChunkCoord, heightmap: Uint8Array, lod: number, lodChunkSize: number, paletteIndex: number,
+    coord: ChunkCoord, heightmap: Uint8Array, lod: number, lodChunkSize: number,
     minWorldY: number, worldYExtent: number,
   ): HeightmapObject {
     const { worldScale } = this.config;
@@ -93,18 +114,7 @@ export class ChunkManager {
       dims: [lodChunkSize, lodChunkSize],
       heightmap,
       palette: TERRAIN_PALETTE,
-      paletteIndex,
     };
-  }
-
-  setGrassPaletteIndex(index: number): void {
-    this.grassPaletteIndex = index;
-    this.chunks.clear();
-    this.pendingChunks.clear();
-    this.chunkCache.clear();
-    this.lastPlayerChunkX = null;
-    this.lastPlayerChunkZ = null;
-    this.chunksChanged = true;
   }
 
   /** Reinitialize with new config (e.g., after UI changes) */
@@ -130,6 +140,36 @@ export class ChunkManager {
     };
   }
 
+  private isAreaFullyCovered(cx: number, cz: number, parentLod: number): boolean {
+    const hx = cx * 2;
+    const hz = cz * 2;
+    const childLod = parentLod - 1;
+    for (let dx = 0; dx < 2; dx++) {
+      for (let dz = 0; dz < 2; dz++) {
+        if (!this.isSubAreaCovered(hx + dx, hz + dz, childLod)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private isSubAreaCovered(cx: number, cz: number, lod: number): boolean {
+    if (this.chunks.has(columnLodKey(cx, cz, lod))) return true;
+    if (lod === 0) return false;
+    const hx = cx * 2;
+    const hz = cz * 2;
+    const childLod = lod - 1;
+    for (let dx = 0; dx < 2; dx++) {
+      for (let dz = 0; dz < 2; dz++) {
+        if (!this.isSubAreaCovered(hx + dx, hz + dz, childLod)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   private requestChunkGeneration(x: number, z: number, lod: number): void {
     const key = columnLodKey(x, z, lod);
     if (this.pendingChunks.has(key) || this.chunks.has(key)) return;
@@ -150,13 +190,13 @@ export class ChunkManager {
       x,
       z,
       lod,
-      grassPaletteIndex: this.grassPaletteIndex,
     };
 
     this.worker.postMessage(msg);
   }
 
   update(playerPosition: vec3): boolean {
+    this._frameNum++;
     const { worldScale } = this.config;
     const playerChunkX = Math.floor(playerPosition[0] / worldScale);
     const playerChunkZ = Math.floor(playerPosition[2] / worldScale);
@@ -170,56 +210,54 @@ export class ChunkManager {
     if (playerMoved) {
       this.lastPlayerChunkX = playerChunkX;
       this.lastPlayerChunkZ = playerChunkZ;
+    }
 
-      const { lodLevels } = this.config;
-      const playerWorldX = playerPosition[0];
-      const playerWorldZ = playerPosition[2];
+    const { lodLevels } = this.config;
+    const playerWorldX = playerPosition[0];
+    const playerWorldZ = playerPosition[2];
 
-      // Unload distant chunks (keyed by xz column)
-      for (const [key, chunk] of this.chunks.entries()) {
-        const lodScale = Math.pow(2, chunk.lod);
-        const lodWorldScale = worldScale * lodScale;
+    // Unload chunks — runs every frame so newly-arrived finer chunks
+    // can immediately replace coarse parents (not just on chunk-boundary crossings).
+    for (const [key, chunk] of this.chunks.entries()) {
+      const lodScale = Math.pow(2, chunk.lod);
+      const lodWorldScale = worldScale * lodScale;
+      const playerLodChunkX = Math.floor(playerWorldX / lodWorldScale);
+      const playerLodChunkZ = Math.floor(playerWorldZ / lodWorldScale);
+      const chunkDistX = Math.abs(chunk.coord.x - playerLodChunkX) * lodWorldScale;
+      const chunkDistZ = Math.abs(chunk.coord.z - playerLodChunkZ) * lodWorldScale;
+      const worldDistH = Math.max(chunkDistX, chunkDistZ);
+      const maxWorldDistH = lodLevels[chunk.lod] * worldScale + lodWorldScale * 2;
 
-        const playerLodChunkX = Math.floor(playerWorldX / lodWorldScale);
-        const playerLodChunkZ = Math.floor(playerWorldZ / lodWorldScale);
-        const chunkDistX = Math.abs(chunk.coord.x - playerLodChunkX) * lodWorldScale;
-        const chunkDistZ = Math.abs(chunk.coord.z - playerLodChunkZ) * lodWorldScale;
-        const worldDistH = Math.max(chunkDistX, chunkDistZ);
-
-        const maxWorldDistH = lodLevels[chunk.lod] * worldScale + lodWorldScale * 2;
-
-        if (worldDistH > maxWorldDistH) {
-          this.chunks.delete(key);
-          this.chunksChanged = true;
-          continue;
+      if (worldDistH > maxWorldDistH) {
+        // Don't create gaps: only remove if a coarser LOD already covers this area
+        if (chunk.lod + 1 < lodLevels.length) {
+          const parentX = chunk.coord.x >> 1;
+          const parentZ = chunk.coord.z >> 1;
+          if (!this.chunks.has(columnLodKey(parentX, parentZ, chunk.lod + 1))) {
+            continue;
+          }
         }
+        this.chunks.delete(key);
+        this.chunksChanged = true;
+        continue;
+      }
 
-        // Unload low-res when player is close enough for higher-res
-        if (chunk.lod > 0) {
-          const minWorldDistH = lodLevels[chunk.lod - 1] * worldScale;
-          if (worldDistH < minWorldDistH) {
-            // Check if 4 higher-LOD children (2x2 in xz) are ready
-            const hx = chunk.coord.x * 2;
-            const hz = chunk.coord.z * 2;
-            const higherLod = chunk.lod - 1;
-
-            let allReady = true;
-            for (let dx = 0; dx < 2 && allReady; dx++) {
-              for (let dz = 0; dz < 2 && allReady; dz++) {
-                const hKey = columnLodKey(hx + dx, hz + dz, higherLod);
-                if (!this.chunks.has(hKey)) {
-                  allReady = false;
-                }
-              }
-            }
-
-            if (allReady) {
-              this.chunks.delete(key);
-              this.chunksChanged = true;
-            }
+      // Unload low-res when higher-res chunks fully cover its area.
+      // Recursive quadtree check...
+      if (chunk.lod > 0) {
+        const minWorldDistH = lodLevels[chunk.lod - 1] * worldScale;
+        if (worldDistH < minWorldDistH) {
+          if (this.isAreaFullyCovered(chunk.coord.x, chunk.coord.z, chunk.lod)) {
+            this.chunks.delete(key);
+            this.chunksChanged = true;
           }
         }
       }
+    }
+
+    // Detect coverage gaps near the player (when enabled)
+    if (this._gapDetectEnabled) {
+      this.detectGaps(playerWorldX, playerWorldZ, worldScale, lodLevels);
     }
 
     // Always try to queue more chunks if there's capacity
@@ -232,7 +270,6 @@ export class ChunkManager {
     return changed;
   }
 
-  /** Queue chunks for loading — iterates only (x, z) per LOD, no Y loop */
   private queueChunksForLoading(playerPosition: vec3): void {
     const { lodLevels, worldScale } = this.config;
 
@@ -276,15 +313,13 @@ export class ChunkManager {
     }
 
     if (candidates.length === 0) return;
-
-    // Sort by priority (LOD 0 first, then by horizontal distance)
     candidates.sort((a, b) => a.dist - b.dist);
 
     // If queue is full and we have LOD 0 candidates, clear distant higher-LOD pending
     const lod0Candidates = candidates.filter((c) => c.lod === 0);
     if (lod0Candidates.length > 0 && this.pendingChunks.size >= MAX_PENDING_REQUESTS) {
       for (const key of this.pendingChunks) {
-        if (!key.includes('lod0')) {
+        if (lodFromKey(key) !== 0) {
           this.pendingChunks.delete(key);
           if (this.pendingChunks.size < MAX_PENDING_REQUESTS / 2) break;
         }
@@ -317,6 +352,129 @@ export class ChunkManager {
 
   getConfig(): Readonly<TerrainConfig> {
     return this.config;
+  }
+
+  /** Toggle per-frame gap detection. Logs whenever an area near the player has no coverage. */
+  toggleGapDetect(): void {
+    this._gapDetectEnabled = !this._gapDetectEnabled;
+    console.log(`[gap-detect] ${this._gapDetectEnabled ? 'ON — move around, gaps will be logged' : 'OFF'}`);
+  }
+
+  /**
+   * For each LOD level, scan the ring of chunks that SHOULD exist and check
+   * if they (or any coarser chunk) are actually loaded. Logs uncovered areas.
+   */
+  private detectGaps(
+    playerWorldX: number, playerWorldZ: number,
+    worldScale: number, lodLevels: number[],
+  ): void {
+    const gaps: string[] = [];
+
+    for (let lod = 0; lod < lodLevels.length && gaps.length < 12; lod++) {
+      const lodScale = 1 << lod;
+      const lodWorldScale = worldScale * lodScale;
+      const minWorldDist = lod === 0 ? 0 : lodLevels[lod - 1] * worldScale;
+      const maxWorldDist = lodLevels[lod] * worldScale;
+
+      const playerLodX = Math.floor(playerWorldX / lodWorldScale);
+      const playerLodZ = Math.floor(playerWorldZ / lodWorldScale);
+      const radius = Math.min(Math.ceil(maxWorldDist / lodWorldScale) + 1, 32);
+
+      for (let dx = -radius; dx <= radius && gaps.length < 12; dx++) {
+        for (let dz = -radius; dz <= radius && gaps.length < 12; dz++) {
+          const chunkDist = Math.max(Math.abs(dx), Math.abs(dz)) * lodWorldScale;
+          if (chunkDist > maxWorldDist) continue;
+          if (lod > 0 && chunkDist < minWorldDist) continue;
+
+          const cx = playerLodX + dx;
+          const cz = playerLodZ + dz;
+
+          // Check this chunk and all coarser LODs
+          let covered = false;
+          for (let checkLod = lod; checkLod < lodLevels.length && !covered; checkLod++) {
+            const shift = checkLod - lod;
+            if (this.chunks.has(columnLodKey(cx >> shift, cz >> shift, checkLod))) {
+              covered = true;
+            }
+          }
+
+          if (!covered) {
+            const pending = this.pendingChunks.has(columnLodKey(cx, cz, lod));
+            gaps.push(`  lod${lod}(${cx},${cz}) dist=${chunkDist.toFixed(0)} ${pending ? 'PENDING' : 'MISSING'}`);
+          }
+        }
+      }
+    }
+
+    if (gaps.length > 0) {
+      console.log(`[gap-detect] f${this._frameNum} ${gaps.length}+ gaps:\n${gaps.join('\n')}`);
+    }
+  }
+
+  /** Log why coarse chunks near the player aren't being removed */
+  debugStuckChunks(): void {
+    if (!this.lastPlayerPosition) return;
+    const { worldScale, lodLevels } = this.config;
+    const px = this.lastPlayerPosition[0];
+    const pz = this.lastPlayerPosition[2];
+
+    const stuck: string[] = [];
+    for (const [key, chunk] of this.chunks.entries()) {
+      if (chunk.lod === 0) continue;
+
+      const lodScale = Math.pow(2, chunk.lod);
+      const lodWorldScale = worldScale * lodScale;
+      const playerLodX = Math.floor(px / lodWorldScale);
+      const playerLodZ = Math.floor(pz / lodWorldScale);
+      const distX = Math.abs(chunk.coord.x - playerLodX) * lodWorldScale;
+      const distZ = Math.abs(chunk.coord.z - playerLodZ) * lodWorldScale;
+      const worldDist = Math.max(distX, distZ);
+      const minDist = lodLevels[chunk.lod - 1] * worldScale;
+
+      if (worldDist >= minDist) continue; // not in replacement zone
+
+      const covered = this.isAreaFullyCovered(chunk.coord.x, chunk.coord.z, chunk.lod);
+      if (!covered) {
+        const missing = this.findUncoveredCells(chunk.coord.x, chunk.coord.z, chunk.lod, 5);
+        stuck.push(
+          `${keyToString(key)} lod=${chunk.lod} coord=(${chunk.coord.x},${chunk.coord.z}) ` +
+          `worldDist=${worldDist.toFixed(0)} < minDist=${minDist.toFixed(0)}\n` +
+          missing.map((m) => `  cell(${m.x},${m.z}) uncovered at LOD 0`).join('\n'),
+        );
+      }
+    }
+
+    if (stuck.length === 0) {
+      console.log('[debug] No stuck coarse chunks near player.');
+    } else {
+      console.log(`[debug] ${stuck.length} stuck coarse chunk(s):\n${stuck.join('\n\n')}`);
+    }
+    console.log(`[debug] total chunks=${this.chunks.size} pending=${this.pendingChunks.size}`);
+  }
+
+  /** Find up to `limit` uncovered LOD-0 cells within a parent chunk's area (for debug) */
+  private findUncoveredCells(
+    cx: number, cz: number, parentLod: number, limit: number,
+  ): { x: number; z: number }[] {
+    const result: { x: number; z: number }[] = [];
+    this.collectUncovered(cx, cz, parentLod, result, limit);
+    return result;
+  }
+
+  private collectUncovered(
+    cx: number, cz: number, lod: number,
+    out: { x: number; z: number }[], limit: number,
+  ): void {
+    if (out.length >= limit) return;
+    if (this.chunks.has(columnLodKey(cx, cz, lod))) return;
+    if (lod === 0) { out.push({ x: cx, z: cz }); return; }
+    const hx = cx * 2;
+    const hz = cz * 2;
+    for (let dx = 0; dx < 2; dx++) {
+      for (let dz = 0; dz < 2; dz++) {
+        this.collectUncovered(hx + dx, hz + dz, lod - 1, out, limit);
+      }
+    }
   }
 
   dispose(): void {

@@ -161,6 +161,12 @@ async function initializeApp(): Promise<AppData> {
   const terrainManager = new ChunkManager();
   app.terrainManager = terrainManager;
 
+  // Debug: press F9 to dump stuck chunk info to console
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F9') terrainManager.debugStuckChunks();
+    if (e.key === 'F10') terrainManager.toggleGapDetect();
+  });
+
   // Upload sponza once as static objects
   renderer.uploadStaticObjects(sponzaObjects, []);
 

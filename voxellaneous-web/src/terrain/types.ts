@@ -23,6 +23,8 @@ export interface NoiseLayer {
   persistence: number;
   /** Offset for seed variation between layers */
   seedOffset: number;
+  /** If true, this layer is "detail" noise that flat biomes can suppress */
+  detail?: boolean;
 }
 
 /** Configuration for terrain generation */
@@ -54,10 +56,10 @@ export interface Chunk {
 /** Default noise layers */
 export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
   {
-    name: 'Mountains',
+    name: 'Continents',
     enabled: true,
-    frequency: 0.0001,
-    amplitude: 5,
+    frequency: 0.00005,
+    amplitude: 1.0,
     octaves: 2,
     persistence: 0.4,
     seedOffset: 0,
@@ -65,20 +67,22 @@ export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
   {
     name: 'Hills',
     enabled: true,
-    frequency: 0.001,
-    amplitude: 0.5,
-    octaves: 1,
-    persistence: 0.4,
+    frequency: 0.0005,
+    amplitude: 0.4,
+    octaves: 2,
+    persistence: 0.35,
     seedOffset: 1000,
+    detail: true,
   },
   {
     name: 'Details',
     enabled: true,
-    frequency: 0.008,
-    amplitude: 0.05,
+    frequency: 0.004,
+    amplitude: 0.03,
     octaves: 1,
     persistence: 0.3,
     seedOffset: 2000,
+    detail: true,
   },
 ];
 
@@ -90,7 +94,7 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   seed: 1812,
   noiseLayers: DEFAULT_NOISE_LAYERS,
   baseTerrainHeight: 0,
-  heightScale: 256,
+  heightScale: 400,
 };
 
 /** Utility to create a chunk key for Map storage */

@@ -67,6 +67,6 @@ export interface GPUAdapterInfo {
 // Uniform buffer sizes in bytes
 export const UNIFORM_SIZES = {
   PER_FRAME: 80,
-  PER_DRAW: 1168,  // 128 (matrices) + 1024 (palette) + 16 (palette_index, aligned)
+  PER_DRAW: 1152,  // 128 (matrices) + 1024 (palette)
   LIGHTING: 32,
 } as const;

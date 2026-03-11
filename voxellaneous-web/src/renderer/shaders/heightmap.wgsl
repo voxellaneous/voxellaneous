@@ -18,7 +18,6 @@ struct PerDrawUniforms {
     model_matrix:     mat4x4<f32>,
     inv_model_matrix: mat4x4<f32>,
     palette:          array<vec4<u32>, 64>,
-    palette_index:    u32,
 };
 @group(1) @binding(1) var<uniform> u_draw: PerDrawUniforms;
 
@@ -111,6 +110,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     var hit = false;
     var hit_pos_os = vec3<f32>(0.0);
     var hit_normal = vec3<f32>(0.0);
+    var hit_biome_idx = 0u;
 
     let dims_i = i32(chunk_size);
     let voxel_size = 1.0 / dims_f;
@@ -123,8 +123,9 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             break;
         }
 
-        // Texel = integer voxel height; scale to shader Y space [0, chunk_size]
-        let h = f32(textureLoad(heightmap_texture, vec2<u32>(u32(voxel_x), u32(voxel_z)), 0).r) * y_ratio;
+        // RG texture: R = voxel height, G = biome palette index
+        let texel = textureLoad(heightmap_texture, vec2<u32>(u32(voxel_x), u32(voxel_z)), 0);
+        let h = f32(texel.r) * y_ratio;
         let t_col_exit = min(t_max_x, t_max_z);
 
         if h > 0.0 {
@@ -133,6 +134,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
             // Case 1: Ray enters column below terrain height (side or Y-face hit)
             if y_at_entry < h && y_at_entry >= 0.0 {
                 hit = true;
+                hit_biome_idx = texel.g;
                 let pos = ray_voxel + t_current * dir_voxel;
                 hit_pos_os = pos / dims_f - vec3<f32>(0.5);
 
@@ -156,6 +158,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
                     let check_z = i32(floor(clamp(pos.z, 0.0, chunk_size - 0.001)));
                     if check_x == voxel_x && check_z == voxel_z {
                         hit = true;
+                        hit_biome_idx = texel.g;
                         hit_pos_os = pos / dims_f - vec3<f32>(0.5);
                         hit_normal = select(vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), dir_os.y < 0.0);
                         break;
@@ -186,8 +189,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
 
     let hit_pos_ws = (u_draw.model_matrix * vec4<f32>(hit_pos_os, 1.0)).xyz;
 
-    let idx = u_draw.palette_index;
-    let packed = u_draw.palette[idx / 4u][idx % 4u];
+    let packed = u_draw.palette[hit_biome_idx / 4u][hit_biome_idx % 4u];
     let albedo = unpack4x8unorm(packed);
 
     let linear_z = length(hit_pos_ws - u_frame.cam_pos_ws);

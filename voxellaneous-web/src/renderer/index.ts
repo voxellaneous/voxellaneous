@@ -845,7 +845,6 @@ export class Renderer {
     modelMatrix: ArrayLike<number>,
     invModelMatrix: ArrayLike<number>,
     palette: RGBA[],
-    paletteIndex?: number,
   ): GPUBuffer {
     const uniformBuffer = this.device.createBuffer({
       label: 'Per Draw Uniform Buffer',
@@ -864,10 +863,6 @@ export class Renderer {
     }
     this.queue.writeBuffer(uniformBuffer, 128, colorPalette);
 
-    if (paletteIndex !== undefined) {
-      this.queue.writeBuffer(uniformBuffer, 1152, new Uint32Array([paletteIndex]));
-    }
-
     return uniformBuffer;
   }
 
@@ -876,6 +871,8 @@ export class Renderer {
     dims: { width: number; height: number; depthOrArrayLayers?: number },
     data: ArrayLike<number>,
     dimension: GPUTextureDimension,
+    format: GPUTextureFormat = 'r8uint',
+    texelBytes: number = 1,
   ): { texture: GPUTexture; view: GPUTextureView } {
     const texture = this.device.createTexture({
       label,
@@ -883,11 +880,11 @@ export class Renderer {
       mipLevelCount: 1,
       sampleCount: 1,
       dimension,
-      format: 'r8uint',
+      format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
 
-    const bytesPerRow = dims.width;
+    const bytesPerRow = dims.width * texelBytes;
     const rowsPerImage = dimension === '3d' ? dims.height : undefined;
     this.queue.writeTexture(
       { texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
@@ -984,11 +981,13 @@ export class Renderer {
       { width: nx, height: nz },
       obj.heightmap,
       '2d',
+      'rg8uint',
+      2,
     );
 
     const palette = obj.palette || scenePalette;
     const uniformBuffer = this.createPerDrawUniformBuffer(
-      obj.modelMatrix, obj.invModelMatrix, palette, obj.paletteIndex,
+      obj.modelMatrix, obj.invModelMatrix, palette,
     );
 
     const bindGroup = this.device.createBindGroup({
