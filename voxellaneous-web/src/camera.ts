@@ -32,6 +32,12 @@ export class CameraModule {
     window.addEventListener('mousemove', (event) => {
       this.handleMouseMove(event);
     });
+
+    document.addEventListener('pointerlockchange', () => {
+      if (!this.isFocused()) {
+        this.keysPressedState = {};
+      }
+    });
   }
 
   setPosition(position: vec3) {
