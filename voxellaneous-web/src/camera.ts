@@ -13,7 +13,7 @@ export class CameraModule {
     up: [0, 1, 0] as vec3,
     yaw: 0,
     pitch: 0,
-    speed: 1.0,
+    speed: 60,
   };
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -143,8 +143,9 @@ export class CameraModule {
     vec3.normalize(this.camera.right, this.camera.right);
   }
 
-  private updateCameraPosition() {
-    let motion: vec3 = [0, 0, 0];
+  /** Returns the normalized WASD+Space/Shift input motion vector without applying it. */
+  getInputMotion(): vec3 {
+    const motion: vec3 = [0, 0, 0];
     if (this.keysPressedState['KeyW']) {
       const [x, _, z] = this.camera.direction;
       vec3.add(motion, motion, [x, 0, z]);
@@ -167,10 +168,29 @@ export class CameraModule {
     if (this.keysPressedState['ShiftLeft']) {
       vec3.subtract(motion, motion, this.camera.up);
     }
-    if (vec3.length(motion) === 0) return;
+    if (vec3.length(motion) > 0) {
+      vec3.normalize(motion, motion);
+    }
+    return motion;
+  }
 
-    vec3.normalize(motion, motion);
-    vec3.scale(motion, motion, this.camera.speed);
+  /** Returns true if the given key is currently pressed. */
+  isKeyPressed(code: string): boolean {
+    return !!this.keysPressedState[code];
+  }
+
+  /** Updates camera direction from mouse input. Call every frame. */
+  updateLook(): void {
+    if (!this.isFocused()) return;
+    this.updateCameraDirection();
+  }
+
+  /** Applies fly movement: input motion scaled by speed and dt. */
+  updateFlyMovement(dt: number): void {
+    if (!this.isFocused()) return;
+    const motion = this.getInputMotion();
+    if (vec3.length(motion) === 0) return;
+    vec3.scale(motion, motion, this.camera.speed * dt);
     vec3.add(this.camera.position, this.camera.position, motion);
   }
 
@@ -178,6 +198,10 @@ export class CameraModule {
     if (!this.isFocused()) return;
 
     this.updateCameraDirection();
-    this.updateCameraPosition();
+    // Legacy: non-dt fly movement (kept for backward compat during transition)
+    const motion = this.getInputMotion();
+    if (vec3.length(motion) === 0) return;
+    vec3.scale(motion, motion, this.camera.speed);
+    vec3.add(this.camera.position, this.camera.position, motion);
   }
 }

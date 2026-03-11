@@ -61,7 +61,7 @@ fn apply_fog(
 
     // Directional inscattering (warm near sun, cool elsewhere)
     let sun_amount = max(dot(ray_dir, sun_dir), 0.0);
-    let sun_cutoff = select(1.0, 1.0, dot(sun_dir, vec3<f32>(0, 1, 0)) > 0.0);
+    let sun_cutoff = select(0.0, 1.0, dot(sun_dir, vec3<f32>(0, 1, 0)) > 0.0);
     let fog_color = sun_cutoff * mix(
         vec3<f32>(0.5, 0.6, 0.7),
         vec3<f32>(1.0, 0.9, 0.7),

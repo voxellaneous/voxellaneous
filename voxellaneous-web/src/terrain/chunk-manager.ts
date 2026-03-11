@@ -477,6 +477,58 @@ export class ChunkManager {
     }
   }
 
+  /** Query terrain height at a world position. Returns world Y or null if no chunk data covers this point. */
+  queryHeight(worldX: number, worldZ: number): number | null {
+    const { worldScale, chunkSize, lodLevels } = this.config;
+
+    // Try LOD 0 first for best accuracy, fall back to coarser LODs
+    for (let lod = 0; lod < lodLevels.length; lod++) {
+      const lodScale = 1 << lod;
+      const lodWorldScale = worldScale * lodScale;
+      const voxelSize = lodWorldScale / chunkSize;
+
+      const chunkX = Math.floor(worldX / lodWorldScale);
+      const chunkZ = Math.floor(worldZ / lodWorldScale);
+      const key = columnLodKey(chunkX, chunkZ, lod);
+
+      const cached = this.chunkCache.get(key);
+      if (!cached) continue;
+
+      // Invert the worker's sample center formula:
+      //   wx = chunkWorldOrigin + (lx + 0.5) * voxelSize - lodWorldScale * 0.5
+      const chunkWorldX = chunkX * lodWorldScale;
+      const chunkWorldZ = chunkZ * lodWorldScale;
+      const fx = (worldX - chunkWorldX + lodWorldScale * 0.5) / voxelSize - 0.5;
+      const fz = (worldZ - chunkWorldZ + lodWorldScale * 0.5) / voxelSize - 0.5;
+
+      // Bilinear interpolation sample positions
+      const ix = Math.floor(fx);
+      const iz = Math.floor(fz);
+      const u = fx - ix;
+      const v = fz - iz;
+
+      const x0 = Math.max(0, Math.min(chunkSize - 1, ix));
+      const x1 = Math.max(0, Math.min(chunkSize - 1, ix + 1));
+      const z0 = Math.max(0, Math.min(chunkSize - 1, iz));
+      const z1 = Math.max(0, Math.min(chunkSize - 1, iz + 1));
+
+      // Read height values (R channel of interleaved RG data, stride 2)
+      const h00 = cached.heightmap[(x0 + z0 * chunkSize) * 2];
+      const h10 = cached.heightmap[(x1 + z0 * chunkSize) * 2];
+      const h01 = cached.heightmap[(x0 + z1 * chunkSize) * 2];
+      const h11 = cached.heightmap[(x1 + z1 * chunkSize) * 2];
+
+      const voxelH = (1 - u) * (1 - v) * h00
+                   + u * (1 - v) * h10
+                   + (1 - u) * v * h01
+                   + u * v * h11;
+
+      return cached.minWorldY + voxelH * voxelSize;
+    }
+
+    return null;
+  }
+
   dispose(): void {
     this.worker.terminate();
   }

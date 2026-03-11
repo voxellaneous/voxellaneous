@@ -19,14 +19,47 @@ function initializeCameraControls(pane: Pane, app: AppData): void {
 
     folder
       .addBinding(app, 'cameraSpeed', {
-        label: 'Speed',
-        min: 0.1,
-        max: 10,
-        step: 0.1,
+        label: 'Fly Speed',
+        min: 10,
+        max: 5000,
+        step: 10,
       })
       .on('change', (ev) => {
         app.cameraModule?.setSpeed(ev.value);
       });
+
+    if (app.characterController) {
+      const cc = app.characterController;
+      const physicsFolder = folder.addFolder({ title: 'Physics (F to toggle)', expanded: false });
+
+      physicsFolder.addBinding(cc.config, 'walkSpeed', {
+        label: 'Walk Speed',
+        min: 32,
+        max: 320,
+        step: 16,
+      });
+
+      physicsFolder.addBinding(cc.config, 'gravity', {
+        label: 'Gravity',
+        min: -640,
+        max: -32,
+        step: 16,
+      });
+
+      physicsFolder.addBinding(cc.config, 'jumpVelocity', {
+        label: 'Jump Force',
+        min: 50,
+        max: 400,
+        step: 10,
+      });
+
+      physicsFolder.addBinding(cc.config, 'playerHeight', {
+        label: 'Eye Height',
+        min: 16,
+        max: 96,
+        step: 4,
+      });
+    }
   }
 }
 

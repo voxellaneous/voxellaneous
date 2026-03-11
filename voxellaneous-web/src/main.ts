@@ -11,6 +11,7 @@ import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
 import { ByteArray } from './common/types';
 import { ChunkManager } from './terrain';
+import { CharacterController } from './character-controller';
 
 const remoteMarkerSize = 4;
 const reusableMvp = new Float32Array(16);
@@ -75,7 +76,10 @@ export type AppData = {
   fogHeightFalloff: number;
   terrainManager?: ChunkManager;
   cameraModule?: CameraModule;
+  characterController?: CharacterController;
   cameraSpeed: number;
+  sponzaPosition: { x: number; y: number; z: number };
+  repositionSponza?: () => void;
 };
 
 function createCanvasAutoresize({ renderer, canvas }: AppData): { autoresizeCanvas: VoidFunction } {
@@ -117,7 +121,7 @@ async function initializeApp(): Promise<AppData> {
   const renderer = await Renderer.new(canvas);
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
-  cameraModule.setPosition([-100, 800, -356]); // Above terrain level
+  cameraModule.setPosition([3770, 300, 620]); // Above terrain level
 
   const app: AppData = {
     renderer,
@@ -134,13 +138,14 @@ async function initializeApp(): Promise<AppData> {
     fogHeightFalloff: 0.005,
     cameraModule,
     cameraSpeed: cameraModule.speed,
+    sponzaPosition: { x: 3770, y: 755, z: 620 },
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
 
   const { autoresizeCanvas } = createCanvasAutoresize(app);
 
   // Load sponza scene
-  let sponzaObjects: VoxelObject[] = [];
+  let sponzaBaseObjects: VoxelObject[] = [];
   try {
     const response = await fetch('/resources/sponza.voxgz');
     if (response.ok) {
@@ -148,19 +153,10 @@ async function initializeApp(): Promise<AppData> {
       const file = new File([blob], 'sponza.voxgz');
       const result = await importFromBinary(file);
       const sponzaScene = createSceneFromResult(result);
-      // Attach sponza palette and offset Y position
-      const sponzaYOffset = 1310; // Move sponza down to terrain level
-      sponzaObjects = sponzaScene.objects.map((obj) => {
-        const offsetMatrix = mat4.clone(obj.modelMatrix);
-        offsetMatrix[13] += sponzaYOffset; // Add to Y translation
-        const invOffsetMatrix = mat4.invert(mat4.create(), offsetMatrix)!;
-        return {
-          ...obj,
-          modelMatrix: offsetMatrix,
-          invModelMatrix: invOffsetMatrix,
-          palette: sponzaScene.palette,
-        };
-      });
+      sponzaBaseObjects = sponzaScene.objects.map((obj) => ({
+        ...obj,
+        palette: sponzaScene.palette,
+      }));
     }
   } catch (e) {
     console.warn('Failed to load sponza:', e);
@@ -171,14 +167,37 @@ async function initializeApp(): Promise<AppData> {
   const terrainManager = new ChunkManager();
   app.terrainManager = terrainManager;
 
+  const characterController = new CharacterController();
+  characterController.setFromEyePosition(cameraModule.position);
+  app.characterController = characterController;
+
   // Debug: press F9 to dump stuck chunk info to console
   window.addEventListener('keydown', (e) => {
     if (e.key === 'F9') terrainManager.debugStuckChunks();
     if (e.key === 'F10') terrainManager.toggleGapDetect();
+    if (e.code === 'KeyF' && !e.repeat) {
+      characterController.toggleFlyWalk();
+      if (!characterController.isFlying) {
+        characterController.setFromEyePosition(cameraModule.position);
+      }
+    }
   });
 
-  // Upload sponza once as static objects
-  renderer.uploadStaticObjects(sponzaObjects, []);
+  function offsetSponza(base: VoxelObject[], pos: { x: number; y: number; z: number }): VoxelObject[] {
+    return base.map((obj) => {
+      const m = mat4.clone(obj.modelMatrix);
+      m[12] += pos.x;
+      m[13] += pos.y;
+      m[14] += pos.z;
+      return { ...obj, modelMatrix: m, invModelMatrix: mat4.invert(mat4.create(), m)! };
+    });
+  }
+
+  // Upload sponza with initial position
+  renderer.uploadStaticObjects(offsetSponza(sponzaBaseObjects, app.sponzaPosition), []);
+  app.repositionSponza = () => {
+    renderer.uploadStaticObjects(offsetSponza(sponzaBaseObjects, app.sponzaPosition), []);
+  };
 
   // Initial terrain load (dynamic)
   terrainManager.update(cameraModule.position);
@@ -214,11 +233,24 @@ async function initializeApp(): Promise<AppData> {
   });
 
   // NOW start render loop after scene is uploaded
+  let lastFrameTime = 0;
   const render: FrameRequestCallback = (time) => {
+    const dt = lastFrameTime === 0 ? 1 / 60 : Math.min((time - lastFrameTime) / 1000, 0.1);
+    lastFrameTime = time;
+
     autoresizeCanvas();
     updateProfilerData(profilerData, time);
 
-    cameraModule.update();
+    cameraModule.updateLook();
+    if (characterController.isFlying) {
+      cameraModule.updateFlyMovement(dt);
+    } else {
+      const motion = cameraModule.getInputMotion();
+      const jumpPressed = cameraModule.isKeyPressed('Space');
+      const eyePos = characterController.update(dt, motion, jumpPressed, (x, z) => terrainManager.queryHeight(x, z));
+      cameraModule.setPosition(eyePos);
+    }
+
     network.setLocalState(
       { x: cameraModule.position[0], y: cameraModule.position[1], z: cameraModule.position[2] },
       { x: cameraModule.direction[0], y: cameraModule.direction[1], z: cameraModule.direction[2] },
