@@ -225,6 +225,21 @@ export class ChunkManager {
       const maxWorldDistH = lodLevels[chunk.lod] * worldScale + lodWorldScale * 2;
 
       if (worldDistH > maxWorldDistH) {
+        // Wait for parent only if the parent is within its own range (will actually load)
+        if (chunk.lod + 1 < lodLevels.length) {
+          const parentLod = chunk.lod + 1;
+          const parentX = chunk.coord.x >> 1;
+          const parentZ = chunk.coord.z >> 1;
+          if (!this.chunks.has(columnLodKey(parentX, parentZ, parentLod))) {
+            const pScale = Math.pow(2, parentLod);
+            const pWorldScale = worldScale * pScale;
+            const pDistX = Math.abs(parentX - Math.floor(playerWorldX / pWorldScale)) * pWorldScale;
+            const pDistZ = Math.abs(parentZ - Math.floor(playerWorldZ / pWorldScale)) * pWorldScale;
+            const pDist = Math.max(pDistX, pDistZ);
+            const pMaxDist = lodLevels[parentLod] * worldScale + pWorldScale * 2;
+            if (pDist <= pMaxDist) continue; // parent in range, wait for it
+          }
+        }
         this.chunks.delete(key);
         this.chunksChanged = true;
         continue;
