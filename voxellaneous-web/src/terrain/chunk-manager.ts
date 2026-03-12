@@ -18,10 +18,6 @@ function columnLodKey(x: number, z: number, lod: number): number {
   return ((x + COORD_OFFSET) * COORD_RANGE + (z + COORD_OFFSET)) * LOD_RANGE + lod;
 }
 
-function lodFromKey(key: number): number {
-  return key % LOD_RANGE;
-}
-
 function keyToString(key: number): string {
   const lod = key % LOD_RANGE;
   const rest = (key - lod) / LOD_RANGE;
@@ -96,8 +92,8 @@ export class ChunkManager {
     const lodScale = Math.pow(2, lod);
     const lodWorldScale = worldScale * lodScale;
 
-    const worldX = coord.x * lodWorldScale;
-    const worldZ = coord.z * lodWorldScale;
+    const worldX = (coord.x + 0.5) * lodWorldScale;
+    const worldZ = (coord.z + 0.5) * lodWorldScale;
 
     // Non-uniform Y: box fits exact height range, not a cube
     const modelMatrix = mat4.create();
@@ -229,14 +225,6 @@ export class ChunkManager {
       const maxWorldDistH = lodLevels[chunk.lod] * worldScale + lodWorldScale * 2;
 
       if (worldDistH > maxWorldDistH) {
-        // Don't create gaps: only remove if a coarser LOD already covers this area
-        if (chunk.lod + 1 < lodLevels.length) {
-          const parentX = chunk.coord.x >> 1;
-          const parentZ = chunk.coord.z >> 1;
-          if (!this.chunks.has(columnLodKey(parentX, parentZ, chunk.lod + 1))) {
-            continue;
-          }
-        }
         this.chunks.delete(key);
         this.chunksChanged = true;
         continue;
@@ -314,17 +302,6 @@ export class ChunkManager {
 
     if (candidates.length === 0) return;
     candidates.sort((a, b) => a.dist - b.dist);
-
-    // If queue is full and we have LOD 0 candidates, clear distant higher-LOD pending
-    const lod0Candidates = candidates.filter((c) => c.lod === 0);
-    if (lod0Candidates.length > 0 && this.pendingChunks.size >= MAX_PENDING_REQUESTS) {
-      for (const key of this.pendingChunks) {
-        if (lodFromKey(key) !== 0) {
-          this.pendingChunks.delete(key);
-          if (this.pendingChunks.size < MAX_PENDING_REQUESTS / 2) break;
-        }
-      }
-    }
 
     const maxToQueue = MAX_PENDING_REQUESTS - this.pendingChunks.size;
     for (let i = 0; i < Math.min(candidates.length, maxToQueue); i++) {
@@ -495,11 +472,11 @@ export class ChunkManager {
       if (!cached) continue;
 
       // Invert the worker's sample center formula:
-      //   wx = chunkWorldOrigin + (lx + 0.5) * voxelSize - lodWorldScale * 0.5
+      //   wx = chunkWorldOrigin + (lx + 0.5) * voxelSize
       const chunkWorldX = chunkX * lodWorldScale;
       const chunkWorldZ = chunkZ * lodWorldScale;
-      const fx = (worldX - chunkWorldX + lodWorldScale * 0.5) / voxelSize - 0.5;
-      const fz = (worldZ - chunkWorldZ + lodWorldScale * 0.5) / voxelSize - 0.5;
+      const fx = (worldX - chunkWorldX) / voxelSize - 0.5;
+      const fz = (worldZ - chunkWorldZ) / voxelSize - 0.5;
 
       // Bilinear interpolation sample positions
       const ix = Math.floor(fx);

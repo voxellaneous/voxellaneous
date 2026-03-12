@@ -187,8 +187,8 @@ function generateColumnHeightmap(
 
   for (let lx = 0; lx < chunkSize; lx++) {
     for (let lz = 0; lz < chunkSize; lz++) {
-      const wx = worldX + (lx + 0.5) * voxelSize - lodWorldScale * 0.5;
-      const wz = worldZ + (lz + 0.5) * voxelSize - lodWorldScale * 0.5;
+      const wx = worldX + (lx + 0.5) * voxelSize;
+      const wz = worldZ + (lz + 0.5) * voxelSize;
       const { temperature, humidity } = sampleClimate(wx, wz);
       const h = sampleTerrainHeight(wx, wz, temperature, humidity, config, generators);
       const idx = lx + lz * chunkSize;
