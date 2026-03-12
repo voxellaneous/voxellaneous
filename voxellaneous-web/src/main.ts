@@ -120,7 +120,7 @@ async function initializeApp(): Promise<AppData> {
 
   const renderer = await Renderer.new(canvas);
   const cameraModule = new CameraModule(canvas);
-  cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
+  cameraModule.setDirection(vec3.normalize(vec3.create(), [0, 0, 1]));
   cameraModule.setPosition([3770, 300, 620]); // Above terrain level
 
   const app: AppData = {
