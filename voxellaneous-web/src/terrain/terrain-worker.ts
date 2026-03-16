@@ -170,7 +170,7 @@ function generateColumnHeightmap(
   lod: number,
   config: TerrainConfig,
   generators: Map<number, NoiseGenerator>,
-): { heightmap: Uint8Array; chunkY: number; minWorldY: number; worldYExtent: number } {
+): { heightmap: Uint8Array; floatHeights: Float32Array; chunkY: number; minWorldY: number; worldYExtent: number } {
   const { chunkSize, worldScale } = config;
   const lodScale = Math.pow(2, lod);
   const lodWorldScale = worldScale * lodScale;
@@ -215,7 +215,13 @@ function generateColumnHeightmap(
     heightmap[i * 2 + 1] = biomeIndices[i];
   }
 
-  return { heightmap, chunkY, minWorldY, worldYExtent };
+  // Float32 heights for shadow clipmap (avoids byte quantization artifacts)
+  const floatHeights = new Float32Array(chunkSize * chunkSize);
+  for (let i = 0; i < chunkSize * chunkSize; i++) {
+    floatHeights[i] = heights[i];
+  }
+
+  return { heightmap, floatHeights, chunkY, minWorldY, worldYExtent };
 }
 
 // Message types
@@ -246,6 +252,8 @@ export interface WorkerResultMessage {
   lod: number;
   /** Interleaved RG data: [height, biomeIdx, ...], size = chunkSize * chunkSize * 2 */
   heightmap: Uint8Array;
+  /** Full-precision terrain heights for shadow clipmap, size = chunkSize * chunkSize */
+  floatHeights: Float32Array;
   lodChunkSize: number;
 }
 
@@ -266,7 +274,7 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
   }
 
   if (msg.type === 'generate') {
-    const { heightmap, chunkY, minWorldY, worldYExtent } = generateColumnHeightmap(
+    const { heightmap, floatHeights, chunkY, minWorldY, worldYExtent } = generateColumnHeightmap(
       msg.x, msg.z, msg.lod, currentConfig, noiseGenerators,
     );
 
@@ -279,9 +287,10 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
       worldYExtent,
       lod: msg.lod,
       heightmap,
+      floatHeights,
       lodChunkSize: currentConfig.chunkSize,
     };
 
-    self.postMessage(response, { transfer: [heightmap.buffer as ArrayBuffer] });
+    self.postMessage(response, { transfer: [heightmap.buffer as ArrayBuffer, floatHeights.buffer as ArrayBuffer] });
   }
 };

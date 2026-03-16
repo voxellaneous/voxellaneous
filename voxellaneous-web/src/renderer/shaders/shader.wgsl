@@ -23,11 +23,10 @@ struct PerDrawUniforms {
 
 @group(1) @binding(0) var voxel_texture: texture_3d<u32>;
 
-// G‑buffer outputs: albedo, normal, linear depth, and explicit fragment depth
+// G‑buffer outputs: albedo, normal, and explicit fragment depth
 struct GBuffer {
     @location(0) albedo:    vec4<f32>, // Rgba8Unorm
     @location(1) normal:    vec4<f32>, // Rgba8Unorm encoded
-    @location(2) linear_z:  u32,       // R16Uint
     @builtin(frag_depth) depth: f32,   // Correct depth for raymarched hit point
 };
 
@@ -163,8 +162,6 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     let packed = u_draw.palette[hit_idx / 4u][hit_idx % 4u];
     let albedo = unpack4x8unorm(packed);
 
-    let linear_z = length(hit_pos_ws - u_frame.cam_pos_ws);
-
     // Compute correct fragment depth from hit position in world space
     // Transform hit_pos_ws to clip space using VP matrix
     let hit_clip = u_frame.vp_matrix * vec4<f32>(hit_pos_ws, 1.0);
@@ -175,7 +172,6 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     return GBuffer(
         albedo,
         vec4<f32>(hit_normal * 0.5 + 0.5, 1.0),
-        u32(clamp(linear_z / 100.0, 0.0, 1.0) * 65535.0),
         frag_depth
     );
 }

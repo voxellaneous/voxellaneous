@@ -9,15 +9,19 @@ import { CUBE_VERTICES, CUBE_INDICES, CUBE_EDGE_INDICES, VERTEX_STRIDE } from '.
 import { packRGBATuple } from './utils';
 import { SkyAtmosphereRasterRenderer, makeEarthAtmosphere } from 'webgpu-sky-atmosphere';
 import type { Uniforms as SkyUniforms } from 'webgpu-sky-atmosphere';
+import type { ShadowClipmapManager } from '../terrain/shadow-clipmap';
+import { SHADOW_CLIPMAP_LEVELS, SHADOW_CLIPMAP_SIZE } from '../terrain/shadow-clipmap';
 
 // Import shaders as raw strings
 import shaderWgsl from './shaders/shader.wgsl?raw';
 import heightmapWgsl from './shaders/heightmap.wgsl?raw';
 import quadLightingWgsl from './shaders/quad_lighting.wgsl?raw';
 import quadFloatWgsl from './shaders/quad_float.wgsl?raw';
-import quadUintWgsl from './shaders/quad_uint.wgsl?raw';
 import wireframeWgsl from './shaders/wireframe.wgsl?raw';
 import tonemapWgsl from './shaders/tonemap.wgsl?raw';
+import quadShadowWgsl from './shaders/quad_shadow.wgsl?raw';
+import quadGrayscaleWgsl from './shaders/quad_grayscale.wgsl?raw';
+import quadDepthWgsl from './shaders/quad_depth.wgsl?raw';
 
 interface AdapterInfo {
   vendor: string;
@@ -35,16 +39,18 @@ export class Renderer {
 
   // Pipelines
   private renderPipeline: GPURenderPipeline;
-  private quadPipelineUint: GPURenderPipeline;
   private quadPipelineFloat: GPURenderPipeline;
+  private quadPipelineGrayscale!: GPURenderPipeline;
+  private quadPipelineDepth!: GPURenderPipeline;
   private lightingPipeline: GPURenderPipeline;
   private wireframePipeline: GPURenderPipeline;
 
   // Bind group layouts
   private perFrameBindGroupLayout: GPUBindGroupLayout;
   private perDrawBindGroupLayout: GPUBindGroupLayout;
-  private quadLayoutUint: GPUBindGroupLayout;
   private quadLayoutFloat: GPUBindGroupLayout;
+  private quadLayoutGrayscale!: GPUBindGroupLayout;
+  private quadLayoutDepth!: GPUBindGroupLayout;
   private lightingLayout: GPUBindGroupLayout;
   private wireframeBindGroupLayout: GPUBindGroupLayout;
 
@@ -60,8 +66,6 @@ export class Renderer {
   private gbufferAlbedo: GPUTextureView;
   private gbufferNormalTexture: GPUTexture;
   private gbufferNormal: GPUTextureView;
-  private gbufferLinearZTexture: GPUTexture;
-  private gbufferLinearZ: GPUTextureView;
   private depthTexture: GPUTexture;
   private depthTextureView: GPUTextureView;
   private sampler: GPUSampler;
@@ -93,6 +97,22 @@ export class Renderer {
   private toneMapPipeline!: GPURenderPipeline;
   private toneMapLayout!: GPUBindGroupLayout;
 
+  // Sky/aerial perspective (screen-sized, written by sky pass, read by lighting)
+  private skyAerialTexture!: GPUTexture;
+  private skyAerialView!: GPUTextureView;
+
+  // Shadow buffer (screen-sized, written by shadow pass, read by lighting)
+  private shadowBufferTexture!: GPUTexture;
+  private shadowBufferView!: GPUTextureView;
+  private shadowPipeline!: GPURenderPipeline;
+  private shadowLayout!: GPUBindGroupLayout;
+  private shadowUniformBuffer!: GPUBuffer;
+
+  // Shadow clipmap
+  private shadowClipmapTexture!: GPUTexture;
+  private shadowClipmapView!: GPUTextureView;
+  private shadowClipmapUniformBuffer!: GPUBuffer;
+
   private constructor(
     device: GPUDevice,
     queue: GPUQueue,
@@ -100,13 +120,11 @@ export class Renderer {
     context: GPUCanvasContext,
     surfaceFormat: GPUTextureFormat,
     renderPipeline: GPURenderPipeline,
-    quadPipelineUint: GPURenderPipeline,
     quadPipelineFloat: GPURenderPipeline,
     lightingPipeline: GPURenderPipeline,
     wireframePipeline: GPURenderPipeline,
     perFrameBindGroupLayout: GPUBindGroupLayout,
     perDrawBindGroupLayout: GPUBindGroupLayout,
-    quadLayoutUint: GPUBindGroupLayout,
     quadLayoutFloat: GPUBindGroupLayout,
     lightingLayout: GPUBindGroupLayout,
     wireframeBindGroupLayout: GPUBindGroupLayout,
@@ -119,8 +137,6 @@ export class Renderer {
     gbufferAlbedo: GPUTextureView,
     gbufferNormalTexture: GPUTexture,
     gbufferNormal: GPUTextureView,
-    gbufferLinearZTexture: GPUTexture,
-    gbufferLinearZ: GPUTextureView,
     depthTexture: GPUTexture,
     depthTextureView: GPUTextureView,
     sampler: GPUSampler,
@@ -131,13 +147,11 @@ export class Renderer {
     this.context = context;
     this.surfaceFormat = surfaceFormat;
     this.renderPipeline = renderPipeline;
-    this.quadPipelineUint = quadPipelineUint;
     this.quadPipelineFloat = quadPipelineFloat;
     this.lightingPipeline = lightingPipeline;
     this.wireframePipeline = wireframePipeline;
     this.perFrameBindGroupLayout = perFrameBindGroupLayout;
     this.perDrawBindGroupLayout = perDrawBindGroupLayout;
-    this.quadLayoutUint = quadLayoutUint;
     this.quadLayoutFloat = quadLayoutFloat;
     this.lightingLayout = lightingLayout;
     this.wireframeBindGroupLayout = wireframeBindGroupLayout;
@@ -150,8 +164,6 @@ export class Renderer {
     this.gbufferAlbedo = gbufferAlbedo;
     this.gbufferNormalTexture = gbufferNormalTexture;
     this.gbufferNormal = gbufferNormal;
-    this.gbufferLinearZTexture = gbufferLinearZTexture;
-    this.gbufferLinearZ = gbufferLinearZ;
     this.depthTexture = depthTexture;
     this.depthTextureView = depthTextureView;
     this.sampler = sampler;
@@ -312,7 +324,6 @@ export class Renderer {
         targets: [
           { format: 'rgba8unorm' }, // albedo
           { format: 'rgba8unorm' }, // normal
-          { format: 'r16uint' }, // linearZ
         ],
       },
       primitive: {
@@ -341,26 +352,7 @@ export class Renderer {
       'rgba8unorm',
       'GBuffer Normal',
     );
-    const { texture: gbufferLinearZTexture, view: gbufferLinearZ } = createRenderTexture(
-      device,
-      canvasWidth,
-      canvasHeight,
-      'r16uint',
-      'GBuffer LinearZ',
-    );
-
     // Create quad pipelines
-    const { layout: quadLayoutUint, pipeline: quadPipelineUint } = createFullscreenQuadPipeline(
-      device,
-      surfaceFormat,
-      quadUintWgsl,
-      'uint',
-      'non-filtering',
-      'Quad Layout Uint',
-      'Quad Uint Shader',
-      'Quad Pipeline Uint',
-    );
-
     const { layout: quadLayoutFloat, pipeline: quadPipelineFloat } = createFullscreenQuadPipeline(
       device,
       surfaceFormat,
@@ -410,6 +402,38 @@ export class Renderer {
             viewDimension: '2d',
           },
         },
+        // Shadow buffer (precomputed by shadow pass)
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: {
+            sampleType: 'unfilterable-float',
+            viewDimension: '2d',
+          },
+        },
+        // Sky/aerial perspective (precomputed by sky atmosphere pass)
+        {
+          binding: 6,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: {
+            sampleType: 'float',
+            viewDimension: '2d',
+          },
+        },
+        // Transmittance LUT (from sky atmosphere)
+        {
+          binding: 7,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: {
+            sampleType: 'float',
+            viewDimension: '2d',
+          },
+        },
+        {
+          binding: 8,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: 'filtering' },
+        },
       ],
     });
 
@@ -440,6 +464,59 @@ export class Renderer {
       primitive: {
         topology: 'triangle-list',
       },
+    });
+
+    // Shadow buffer pass pipeline
+    const shadowLayout = device.createBindGroupLayout({
+      label: 'Shadow Bind Group Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+
+    const shadowShader = device.createShaderModule({ label: 'Shadow Shader', code: quadShadowWgsl });
+    const shadowPipeline = device.createRenderPipeline({
+      label: 'Shadow Pipeline',
+      layout: device.createPipelineLayout({ label: 'Shadow Pipeline Layout', bindGroupLayouts: [shadowLayout] }),
+      vertex: { module: shadowShader, entryPoint: 'vs_main' },
+      fragment: { module: shadowShader, entryPoint: 'fs_main', targets: [{ format: 'r8unorm' }] },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    // Grayscale blit pipeline (single-channel texture → grayscale output)
+    const quadLayoutGrayscale = device.createBindGroupLayout({
+      label: 'Quad Grayscale Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+      ],
+    });
+    const grayscaleShader = device.createShaderModule({ label: 'Quad Grayscale Shader', code: quadGrayscaleWgsl });
+    const quadPipelineGrayscale = device.createRenderPipeline({
+      label: 'Quad Grayscale Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [quadLayoutGrayscale] }),
+      vertex: { module: grayscaleShader, entryPoint: 'vs_main' },
+      fragment: { module: grayscaleShader, entryPoint: 'fs_main', targets: [{ format: surfaceFormat }] },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    // Depth visualization pipeline (hardware depth → grayscale)
+    const quadLayoutDepth = device.createBindGroupLayout({
+      label: 'Quad Depth Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d' } },
+      ],
+    });
+    const depthVisShader = device.createShaderModule({ label: 'Quad Depth Shader', code: quadDepthWgsl });
+    const quadPipelineDepth = device.createRenderPipeline({
+      label: 'Quad Depth Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [quadLayoutDepth] }),
+      vertex: { module: depthVisShader, entryPoint: 'vs_main' },
+      fragment: { module: depthVisShader, entryPoint: 'fs_main', targets: [{ format: surfaceFormat }] },
+      primitive: { topology: 'triangle-list' },
     });
 
     // Create wireframe pipeline
@@ -566,7 +643,6 @@ export class Renderer {
         targets: [
           { format: 'rgba8unorm' }, // albedo
           { format: 'rgba8unorm' }, // normal
-          { format: 'r16uint' }, // linearZ
         ],
       },
       primitive: {
@@ -587,13 +663,11 @@ export class Renderer {
       context,
       surfaceFormat,
       renderPipeline,
-      quadPipelineUint,
       quadPipelineFloat,
       lightingPipeline,
       wireframePipeline,
       perFrameBindGroupLayout,
       perDrawBindGroupLayout,
-      quadLayoutUint,
       quadLayoutFloat,
       lightingLayout,
       wireframeBindGroupLayout,
@@ -606,8 +680,6 @@ export class Renderer {
       gbufferAlbedo,
       gbufferNormalTexture,
       gbufferNormal,
-      gbufferLinearZTexture,
-      gbufferLinearZ,
       depthTexture,
       depthTextureView,
       sampler,
@@ -661,6 +733,46 @@ export class Renderer {
     renderer.toneMapPipeline = toneMapPipeline;
     renderer.toneMapLayout = toneMapLayout;
 
+    // Shadow clipmap: r32float 512x512x4 array texture
+    const shadowClipmapTexture = device.createTexture({
+      label: 'Shadow Clipmap Texture',
+      size: { width: SHADOW_CLIPMAP_SIZE, height: SHADOW_CLIPMAP_SIZE, depthOrArrayLayers: SHADOW_CLIPMAP_LEVELS },
+      format: 'r32float',
+      dimension: '2d',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    renderer.shadowClipmapTexture = shadowClipmapTexture;
+    renderer.shadowClipmapView = shadowClipmapTexture.createView({ dimension: '2d-array' });
+    // 4 levels x 4 floats each (originX, originZ, texelSize, invSize) = 64 bytes
+    renderer.shadowClipmapUniformBuffer = device.createBuffer({
+      label: 'Shadow Clipmap Uniform Buffer',
+      size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Grayscale blit resources
+    renderer.quadPipelineGrayscale = quadPipelineGrayscale;
+    renderer.quadLayoutGrayscale = quadLayoutGrayscale;
+    renderer.quadPipelineDepth = quadPipelineDepth;
+    renderer.quadLayoutDepth = quadLayoutDepth;
+
+    // Shadow buffer pass resources
+    renderer.shadowPipeline = shadowPipeline;
+    renderer.shadowLayout = shadowLayout;
+    // ShadowUniforms: light_dir(12) + pad(4) + cam_pos(12) + pad(4) + inverse_vp(64) = 96 bytes
+    renderer.shadowUniformBuffer = device.createBuffer({
+      label: 'Shadow Uniform Buffer',
+      size: 96,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const shadowBuf = createRenderTexture(device, canvas.width, canvas.height, 'r8unorm', 'Shadow Buffer');
+    renderer.shadowBufferTexture = shadowBuf.texture;
+    renderer.shadowBufferView = shadowBuf.view;
+
+    const skyAerial = createRenderTexture(device, canvas.width, canvas.height, hdrFormat, 'Sky Aerial');
+    renderer.skyAerialTexture = skyAerial.texture;
+    renderer.skyAerialView = skyAerial.view;
+
     return renderer;
   }
 
@@ -675,8 +787,9 @@ export class Renderer {
     this.depthTexture.destroy();
     this.gbufferAlbedoTexture.destroy();
     this.gbufferNormalTexture.destroy();
-    this.gbufferLinearZTexture.destroy();
     this.hdrTexture.destroy();
+    this.shadowBufferTexture.destroy();
+    this.skyAerialTexture.destroy();
 
     // Recreate depth texture
     const depth = createDepthTexture(this.device, width, height);
@@ -696,13 +809,17 @@ export class Renderer {
     this.gbufferNormalTexture = normal.texture;
     this.gbufferNormal = normal.view;
 
-    const linearZ = createRenderTexture(this.device, width, height, 'r16uint', 'GBuffer LinearZ');
-    this.gbufferLinearZTexture = linearZ.texture;
-    this.gbufferLinearZ = linearZ.view;
-
     const hdr = createRenderTexture(this.device, width, height, 'rgba16float', 'HDR Buffer');
     this.hdrTexture = hdr.texture;
     this.hdrView = hdr.view;
+
+    const shadowBuf = createRenderTexture(this.device, width, height, 'r8unorm', 'Shadow Buffer');
+    this.shadowBufferTexture = shadowBuf.texture;
+    this.shadowBufferView = shadowBuf.view;
+
+    const skyAerial = createRenderTexture(this.device, width, height, 'rgba16float', 'Sky Aerial');
+    this.skyAerialTexture = skyAerial.texture;
+    this.skyAerialView = skyAerial.view;
   }
 
   render(
@@ -717,8 +834,9 @@ export class Renderer {
     sunIlluminance: number,
     sunDiskScale: number,
     sunDiskSize: number,
+    hazeDensity: number,
     fogDensity: number,
-    fogHeightFalloff: number,
+    fogFalloff: number,
   ): void {
     // Update per-frame uniforms (reuse pre-allocated buffers)
     for (let i = 0; i < 16; i++) {
@@ -754,9 +872,23 @@ export class Renderer {
       }
     }
     // fog_density: offset 96, fog_height_falloff: offset 100
-    this.lightingView.setFloat32(96, fogDensity, true);
-    this.lightingView.setFloat32(100, fogHeightFalloff, true);
-
+    this.lightingView.setFloat32(96, hazeDensity, true);
+    this.lightingView.setFloat32(100, fogDensity, true);
+    this.lightingView.setFloat32(104, fogFalloff, true);
+    // sun_screen: project sun direction (at infinity, w=0) into screen UV
+    {
+      const lx = lightDir[0], ly = lightDir[1], lz = lightDir[2];
+      const cx = vpMatrix[0]*lx + vpMatrix[4]*ly + vpMatrix[8]*lz;
+      const cy = vpMatrix[1]*lx + vpMatrix[5]*ly + vpMatrix[9]*lz;
+      const cw = vpMatrix[3]*lx + vpMatrix[7]*ly + vpMatrix[11]*lz;
+      const inFront = cw > 0;
+      const u = inFront ? Math.max(0, Math.min(1, cx / cw * 0.5 + 0.5)) : 0;
+      const v = inFront ? Math.max(0, Math.min(1, cy / cw * 0.5 + 0.5)) : 0;
+      // offset 112: sun_screen vec4 (after _pad at 108)
+      this.lightingView.setFloat32(112, u, true);
+      this.lightingView.setFloat32(116, v, true);
+      this.lightingView.setFloat32(120, inFront ? 1.0 : 0.0, true);
+    }
     this.queue.writeBuffer(this.lightingUniformBuffer, 0, this.lightingData);
 
     // Create per-frame bind group
@@ -786,12 +918,6 @@ export class Renderer {
           },
           {
             view: this.gbufferNormal,
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          },
-          {
-            view: this.gbufferLinearZ,
             clearValue: { r: 0, g: 0, b: 0, a: 0 },
             loadOp: 'clear',
             storeOp: 'store',
@@ -860,21 +986,80 @@ export class Renderer {
     const frameTexture = this.context.getCurrentTexture();
     const frameView = frameTexture.createView();
 
+    // Shadow buffer pass: compute terrain shadows into separate texture
+    if (presentTarget === 3 || presentTarget === 4) {
+      const shadowData = new ArrayBuffer(96);
+      const sv = new DataView(shadowData);
+      sv.setFloat32(0, lightDir[0], true);
+      sv.setFloat32(4, lightDir[1], true);
+      sv.setFloat32(8, lightDir[2], true);
+      sv.setFloat32(16, viewPosition[0], true);
+      sv.setFloat32(20, viewPosition[1], true);
+      sv.setFloat32(24, viewPosition[2], true);
+      for (let c = 0; c < 4; c++) {
+        for (let r = 0; r < 4; r++) {
+          let sum = 0;
+          for (let k = 0; k < 4; k++) {
+            sum += inverseView[k * 4 + r] * inverseProjection[c * 4 + k];
+          }
+          sv.setFloat32(32 + (c * 4 + r) * 4, sum, true);
+        }
+      }
+      this.queue.writeBuffer(this.shadowUniformBuffer, 0, shadowData);
+
+      const pass = encoder.beginRenderPass({
+        label: 'Shadow Buffer Pass',
+        colorAttachments: [{
+          view: this.shadowBufferView,
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          loadOp: 'clear',
+          storeOp: 'store',
+        }],
+      });
+      const shadowBind = this.device.createBindGroup({
+        label: 'Shadow BG',
+        layout: this.shadowLayout,
+        entries: [
+          { binding: 0, resource: this.gbufferNormal },
+          { binding: 1, resource: { buffer: this.shadowUniformBuffer } },
+          { binding: 2, resource: this.depthOnlyView },
+          { binding: 3, resource: this.shadowClipmapView },
+          { binding: 4, resource: { buffer: this.shadowClipmapUniformBuffer } },
+        ],
+      });
+      pass.setPipeline(this.shadowPipeline);
+      pass.setBindGroup(0, shadowBind);
+      pass.draw(3);
+      pass.end();
+    }
+
     if (presentTarget === 4) {
-      // Lit mode: render lighting + sky to HDR, then tone map to swapchain
+      // Sky atmosphere → separate texture (sky for sky pixels, aerial perspective for geometry)
+      {
+        const pass = encoder.beginRenderPass({
+          label: 'Sky Aerial Pass',
+          colorAttachments: [{
+            view: this.skyAerialView,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          }],
+        });
+        this.skyRenderer.renderSky(pass);
+        pass.end();
+      }
+
+      // Lit mode: lighting shader composites sky/aerial + lit scene → HDR
       {
         const pass = encoder.beginRenderPass({
           label: 'HDR Pass',
-          colorAttachments: [
-            {
-              view: this.hdrView,
-              clearValue: { r: 0, g: 0, b: 0, a: 1 },
-              loadOp: 'clear',
-              storeOp: 'store',
-            },
-          ],
+          colorAttachments: [{
+            view: this.hdrView,
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          }],
         });
-
         const lightingBind = this.device.createBindGroup({
           label: 'Lighting BG',
           layout: this.lightingLayout,
@@ -884,14 +1069,15 @@ export class Renderer {
             { binding: 2, resource: this.sampler },
             { binding: 3, resource: { buffer: this.lightingUniformBuffer } },
             { binding: 4, resource: this.depthOnlyView },
+            { binding: 5, resource: this.shadowBufferView },
+            { binding: 6, resource: this.skyAerialView },
+            { binding: 7, resource: this.skyRenderer.resources.transmittanceLut.view },
+            { binding: 8, resource: this.skyRenderer.resources.lutSampler },
           ],
         });
         pass.setPipeline(this.lightingPipeline);
         pass.setBindGroup(0, lightingBind);
         pass.draw(3);
-
-        // Sky atmosphere on top (additive blend over black sky pixels)
-        this.skyRenderer.renderSky(pass);
         pass.end();
       }
 
@@ -935,47 +1121,58 @@ export class Renderer {
         ],
       });
 
-      let pipeline: GPURenderPipeline;
-      let layout: GPUBindGroupLayout;
-      let view: GPUTextureView;
-
       switch (presentTarget) {
-        case 0:
-          pipeline = this.quadPipelineFloat;
-          layout = this.quadLayoutFloat;
-          view = this.gbufferAlbedo;
+        case 2: {
+          // Depth buffer visualization
+          const depthBind = this.device.createBindGroup({
+            label: 'Quad Depth Debug BG',
+            layout: this.quadLayoutDepth,
+            entries: [{ binding: 0, resource: this.depthOnlyView }],
+          });
+          pass.setPipeline(this.quadPipelineDepth);
+          pass.setBindGroup(0, depthBind);
           break;
-        case 1:
-          pipeline = this.quadPipelineFloat;
-          layout = this.quadLayoutFloat;
-          view = this.gbufferNormal;
+        }
+        case 3: {
+          // Shadow buffer: grayscale blit
+          const shadowBind = this.device.createBindGroup({
+            label: 'Quad Shadow Debug BG',
+            layout: this.quadLayoutGrayscale,
+            entries: [{ binding: 0, resource: this.shadowBufferView }],
+          });
+          pass.setPipeline(this.quadPipelineGrayscale);
+          pass.setBindGroup(0, shadowBind);
           break;
-        case 2:
-          pipeline = this.quadPipelineUint;
-          layout = this.quadLayoutUint;
-          view = this.gbufferLinearZ;
-          break;
-        case 3:
-          pipeline = this.quadPipelineFloat;
-          layout = this.quadLayoutFloat;
-          view = this.gbufferAlbedo;
-          break;
-        default:
-          pipeline = this.quadPipelineFloat;
-          layout = this.quadLayoutFloat;
-          view = this.gbufferAlbedo;
-      }
+        }
+        default: {
+          let pipeline: GPURenderPipeline;
+          let layout: GPUBindGroupLayout;
+          let view: GPUTextureView;
 
-      const quadBind = this.device.createBindGroup({
-        label: 'Quad Present BG',
-        layout,
-        entries: [
-          { binding: 0, resource: view },
-          { binding: 1, resource: this.sampler },
-        ],
-      });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, quadBind);
+          switch (presentTarget) {
+            case 1:
+              pipeline = this.quadPipelineFloat;
+              layout = this.quadLayoutFloat;
+              view = this.gbufferNormal;
+              break;
+            default:
+              pipeline = this.quadPipelineFloat;
+              layout = this.quadLayoutFloat;
+              view = this.gbufferAlbedo;
+          }
+
+          const quadBind = this.device.createBindGroup({
+            label: 'Quad Present BG',
+            layout,
+            entries: [
+              { binding: 0, resource: view },
+              { binding: 1, resource: this.sampler },
+            ],
+          });
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, quadBind);
+        }
+      }
       pass.draw(3);
       pass.end();
     }
@@ -1190,6 +1387,30 @@ export class Renderer {
       textureView,
       uniformBuffer,
     });
+  }
+
+  /** Upload dirty shadow clipmap levels to GPU and update uniforms */
+  uploadShadowClipmap(manager: ShadowClipmapManager): void {
+    const texelSizes = [2, 8, 32, 128];
+    const uniformData = new Float32Array(16); // 4 levels x 4 floats
+
+    for (let i = 0; i < SHADOW_CLIPMAP_LEVELS; i++) {
+      if (manager.dirty[i]) {
+        this.queue.writeTexture(
+          { texture: this.shadowClipmapTexture, origin: { x: 0, y: 0, z: i } },
+          manager.levels[i],
+          { bytesPerRow: SHADOW_CLIPMAP_SIZE * 4 },
+          { width: SHADOW_CLIPMAP_SIZE, height: SHADOW_CLIPMAP_SIZE, depthOrArrayLayers: 1 },
+        );
+        manager.dirty[i] = false;
+      }
+      uniformData[i * 4 + 0] = manager.originX[i];
+      uniformData[i * 4 + 1] = manager.originZ[i];
+      uniformData[i * 4 + 2] = texelSizes[i];
+      uniformData[i * 4 + 3] = 1.0 / SHADOW_CLIPMAP_SIZE;
+    }
+
+    this.queue.writeBuffer(this.shadowClipmapUniformBuffer, 0, uniformData);
   }
 
   /** Upload static objects (only call once, these won't be re-uploaded) */

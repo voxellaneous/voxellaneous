@@ -26,7 +26,6 @@ struct PerDrawUniforms {
 struct GBuffer {
     @location(0) albedo:    vec4<f32>,
     @location(1) normal:    vec4<f32>,
-    @location(2) linear_z:  u32,
     @builtin(frag_depth) depth: f32,
 };
 
@@ -192,14 +191,12 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     let packed = u_draw.palette[hit_biome_idx / 4u][hit_biome_idx % 4u];
     let albedo = unpack4x8unorm(packed);
 
-    let linear_z = length(hit_pos_ws - u_frame.cam_pos_ws);
     let hit_clip = u_frame.vp_matrix * vec4<f32>(hit_pos_ws, 1.0);
     let frag_depth = clamp(hit_clip.z / hit_clip.w, 0.0, 1.0);
 
     return GBuffer(
         albedo,
         vec4<f32>(hit_normal * 0.5 + 0.5, 1.0),
-        u32(clamp(linear_z / 100.0, 0.0, 1.0) * 65535.0),
         frag_depth
     );
 }

@@ -10,7 +10,7 @@ import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
 import { ByteArray } from './common/types';
-import { ChunkManager } from './terrain';
+import { ChunkManager, ShadowClipmapManager } from './terrain';
 import { CharacterController } from './character-controller';
 
 const remoteMarkerSize = 4;
@@ -72,12 +72,14 @@ export type AppData = {
   sunDiskScale: number;
   sunDiskSize: number;
   showBboxes: boolean;
-  fogDensity: number;
-  fogHeightFalloff: number;
   terrainManager?: ChunkManager;
   cameraModule?: CameraModule;
   characterController?: CharacterController;
   cameraSpeed: number;
+  hazeDensity: number;
+  fogDensity: number;
+  fogFalloff: number;
+  sunTimeScale: number;
   sponzaPosition: { x: number; y: number; z: number };
   repositionSponza?: () => void;
 };
@@ -128,16 +130,18 @@ async function initializeApp(): Promise<AppData> {
     canvas,
     presentTarget: 4, // Default to Lit mode
     sunTime: 8,
-    sunAngle: 30,
+    sunAngle: 260,
     ambient: 0.1,
     sunIlluminance: 10,
     sunDiskScale: 0.8,
     sunDiskSize: 2, // 0.545,
     showBboxes: false,
-    fogDensity: 0.0005,
-    fogHeightFalloff: 0.005,
     cameraModule,
     cameraSpeed: cameraModule.speed,
+    hazeDensity: 0.0004,
+    fogDensity: 0,
+    fogFalloff: 0.01,
+    sunTimeScale: 0,
     sponzaPosition: { x: 3770, y: 755, z: 620 },
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
@@ -167,14 +171,13 @@ async function initializeApp(): Promise<AppData> {
   const terrainManager = new ChunkManager();
   app.terrainManager = terrainManager;
 
+  const shadowClipmap = new ShadowClipmapManager(terrainManager.getChunkCache(), terrainManager.getConfig());
+
   const characterController = new CharacterController();
   characterController.setFromEyePosition(cameraModule.position);
   app.characterController = characterController;
 
-  // Debug: press F9 to dump stuck chunk info to console
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'F9') terrainManager.debugStuckChunks();
-    if (e.key === 'F10') terrainManager.toggleGapDetect();
     if (e.code === 'KeyF' && !e.repeat) {
       characterController.toggleFlyWalk();
       if (!characterController.isFlying) {
@@ -271,18 +274,34 @@ async function initializeApp(): Promise<AppData> {
       });
     }
 
+    // Update shadow clipmap from terrain cache and upload dirty levels
+    if (shadowClipmap.update(cameraModule.position[0], cameraModule.position[2], terrainManager.cacheGeneration)) {
+      renderer.uploadShadowClipmap(shadowClipmap);
+    }
+
     const mvpMatrix = cameraModule.calculateMVP();
     const { inverseView, inverseProjection } = cameraModule.getCameraMatrices();
     reusableMvp.set(mvpMatrix);
     reusableCamPos.set(cameraModule.position);
 
-    // Compute sun direction from time of day + azimuth angle
-    const elevDeg = 90 * Math.sin(((app.sunTime - 6) / 12) * Math.PI);
-    const elevRad = (elevDeg * Math.PI) / 180;
+    // Advance time of day
+    if (app.sunTimeScale > 0) {
+      app.sunTime = (app.sunTime + dt * app.sunTimeScale) % 24;
+    }
+
+    // Sun traces a great circle tilted 75° from the horizon
+    // phase=0 at 6h (sunrise), PI/2 at noon (peak), PI at 18h (sunset)
+    const tilt = (75 * Math.PI) / 180;
+    const phase = ((app.sunTime - 6) / 24) * 2 * Math.PI;
+    // Sun in orbit frame, then tilt around X axis
+    const sx = Math.cos(phase);
+    const sy = Math.sin(phase) * Math.sin(tilt);
+    const sz = -Math.sin(phase) * Math.cos(tilt);
+    // Rotate around Y by sunAngle to orient the orbit
     const azimRad = (app.sunAngle * Math.PI) / 180;
-    reusableLightDir[0] = Math.cos(elevRad) * Math.sin(azimRad);
-    reusableLightDir[1] = Math.sin(elevRad);
-    reusableLightDir[2] = Math.cos(elevRad) * Math.cos(azimRad);
+    reusableLightDir[0] = sx * Math.cos(azimRad) + sz * Math.sin(azimRad);
+    reusableLightDir[1] = sy;
+    reusableLightDir[2] = -sx * Math.sin(azimRad) + sz * Math.cos(azimRad);
 
     renderer.render(
       reusableMvp,
@@ -296,8 +315,9 @@ async function initializeApp(): Promise<AppData> {
       app.sunIlluminance,
       app.sunDiskScale,
       app.sunDiskSize,
+      app.hazeDensity,
       app.fogDensity,
-      app.fogHeightFalloff,
+      app.fogFalloff,
     );
   };
   registerRecurringAnimation(render);

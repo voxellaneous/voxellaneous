@@ -21,7 +21,7 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
       { text: 'Albedo', value: 0 },
       { text: 'Normal', value: 1 },
       { text: 'Linear-Z', value: 2 },
-      { text: 'Depth', value: 3 },
+      { text: 'Shadow', value: 3 },
     ],
   });
   settingsFolder.addBinding(app, 'showBboxes', {
@@ -34,6 +34,12 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     min: 0,
     max: 24,
     step: 0.01,
+  });
+  sunFolder.addBinding(app, 'sunTimeScale', {
+    label: 'Time Speed',
+    min: 0,
+    max: 100,
+    step: 0.1,
   });
   sunFolder.addBinding(app, 'sunAngle', {
     label: 'Azimuth (°)',
@@ -67,18 +73,26 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     step: 0.01,
   });
 
-  const fogFolder = pane.addFolder({ title: 'Fog' });
+  const hazeFolder = pane.addFolder({ title: 'Atmospheric Haze' });
+  hazeFolder.addBinding(app, 'hazeDensity', {
+    label: 'Density',
+    min: 0,
+    max: 0.0005,
+    step: 0.000005,
+  });
+
+  const fogFolder = pane.addFolder({ title: 'Ground Fog' });
   fogFolder.addBinding(app, 'fogDensity', {
     label: 'Density',
     min: 0,
-    max: 0.05,
-    step: 0.00001,
+    max: 0.1,
+    step: 0.001,
   });
-  fogFolder.addBinding(app, 'fogHeightFalloff', {
+  fogFolder.addBinding(app, 'fogFalloff', {
     label: 'Height Falloff',
     min: 0.0,
-    max: 1.0,
-    step: 0.0001,
+    max: 0.1,
+    step: 0.001,
   });
 
   const gpuData = app.renderer.get_gpu_info() as GPUData;
