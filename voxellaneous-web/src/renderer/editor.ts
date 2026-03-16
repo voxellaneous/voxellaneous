@@ -66,6 +66,13 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     step: 0.05,
   });
 
+  sunFolder.addBinding(app, 'sunOccSpeed', {
+    label: 'Occ. Speed',
+    min: 0.1,
+    max: 10.0,
+    step: 0.1,
+  });
+
   sunFolder.addBinding(app, 'ambient', {
     label: 'Ambient',
     min: 0,

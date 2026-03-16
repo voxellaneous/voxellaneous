@@ -22,6 +22,9 @@ import tonemapWgsl from './shaders/tonemap.wgsl?raw';
 import quadShadowWgsl from './shaders/quad_shadow.wgsl?raw';
 import quadGrayscaleWgsl from './shaders/quad_grayscale.wgsl?raw';
 import quadDepthWgsl from './shaders/quad_depth.wgsl?raw';
+import sunOcclusionWgsl from './shaders/sun_occlusion.wgsl?raw';
+import lensFlareWgsl from './shaders/lens_flare.wgsl?raw';
+import lensFlareDownsampleWgsl from './shaders/lens_flare_downsample.wgsl?raw';
 
 interface AdapterInfo {
   vendor: string;
@@ -112,6 +115,26 @@ export class Renderer {
   private shadowClipmapTexture!: GPUTexture;
   private shadowClipmapView!: GPUTextureView;
   private shadowClipmapUniformBuffer!: GPUBuffer;
+
+  // Sun occlusion compute
+  private sunOcclusionPipeline!: GPUComputePipeline;
+  private sunOcclusionLayout!: GPUBindGroupLayout;
+  private sunOcclusionBuffer!: GPUBuffer;
+  private sunOcclusionUniform!: GPUBuffer;
+  private sunOcclusionData = new ArrayBuffer(32);
+  private sunOcclusionView = new DataView(this.sunOcclusionData);
+
+  // Lens flare
+  private lensFlareDownPipeline!: GPURenderPipeline;
+  private lensFlareDownLayout!: GPUBindGroupLayout;
+  private lensFlareDownTexture!: GPUTexture;
+  private lensFlareDownView!: GPUTextureView;
+  private lensFlarePipeline!: GPURenderPipeline;
+  private lensFlareLayout!: GPUBindGroupLayout;
+  private lensFlareUniformBuffer!: GPUBuffer;
+  private lensFlareData = new ArrayBuffer(16);
+  private lensFlareView = new DataView(this.lensFlareData);
+  private linearSampler!: GPUSampler;
 
   private constructor(
     device: GPUDevice,
@@ -434,6 +457,12 @@ export class Renderer {
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: 'filtering' },
         },
+        // Sun occlusion (from compute pass)
+        {
+          binding: 9,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: 'read-only-storage' },
+        },
       ],
     });
 
@@ -464,6 +493,22 @@ export class Renderer {
       primitive: {
         topology: 'triangle-list',
       },
+    });
+
+    // Sun occlusion compute pipeline
+    const sunOcclusionLayout = device.createBindGroupLayout({
+      label: 'Sun Occlusion Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'depth', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const sunOcclusionShader = device.createShaderModule({ label: 'Sun Occlusion Shader', code: sunOcclusionWgsl });
+    const sunOcclusionPipeline = device.createComputePipeline({
+      label: 'Sun Occlusion Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [sunOcclusionLayout] }),
+      compute: { module: sunOcclusionShader, entryPoint: 'main' },
     });
 
     // Shadow buffer pass pipeline
@@ -769,9 +814,93 @@ export class Renderer {
     renderer.shadowBufferTexture = shadowBuf.texture;
     renderer.shadowBufferView = shadowBuf.view;
 
+    // Sun occlusion compute resources
+    renderer.sunOcclusionPipeline = sunOcclusionPipeline;
+    renderer.sunOcclusionLayout = sunOcclusionLayout;
+    renderer.sunOcclusionBuffer = device.createBuffer({
+      label: 'Sun Occlusion Buffer',
+      size: 4,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    renderer.sunOcclusionUniform = device.createBuffer({
+      label: 'Sun Occlusion Uniform',
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
     const skyAerial = createRenderTexture(device, canvas.width, canvas.height, hdrFormat, 'Sky Aerial');
     renderer.skyAerialTexture = skyAerial.texture;
     renderer.skyAerialView = skyAerial.view;
+
+    // Linear sampler for lens flare (bilinear filtering)
+    renderer.linearSampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
+
+    // Lens flare downsample + threshold pipeline (HDR → 1/4 res brightness)
+    const lensFlareDownLayout = device.createBindGroupLayout({
+      label: 'Lens Flare Downsample Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const lfDownShader = device.createShaderModule({ label: 'Lens Flare Downsample Shader', code: lensFlareDownsampleWgsl });
+    renderer.lensFlareDownPipeline = device.createRenderPipeline({
+      label: 'Lens Flare Downsample Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [lensFlareDownLayout] }),
+      vertex: { module: lfDownShader, entryPoint: 'vs_main' },
+      fragment: { module: lfDownShader, entryPoint: 'fs_main', targets: [{ format: hdrFormat }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    renderer.lensFlareDownLayout = lensFlareDownLayout;
+
+    // Lens flare 1/4 res brightness texture
+    const lfDown = createRenderTexture(
+      device,
+      Math.max(1, canvas.width >> 2),
+      Math.max(1, canvas.height >> 2),
+      hdrFormat,
+      'Lens Flare Downsample',
+    );
+    renderer.lensFlareDownTexture = lfDown.texture;
+    renderer.lensFlareDownView = lfDown.view;
+
+    // Lens flare feature generation pipeline (additive blend onto HDR)
+    const lensFlareLayout = device.createBindGroupLayout({
+      label: 'Lens Flare Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      ],
+    });
+    const lensFlareShader = device.createShaderModule({ label: 'Lens Flare Shader', code: lensFlareWgsl });
+    renderer.lensFlarePipeline = device.createRenderPipeline({
+      label: 'Lens Flare Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [lensFlareLayout] }),
+      vertex: { module: lensFlareShader, entryPoint: 'vs_main' },
+      fragment: {
+        module: lensFlareShader,
+        entryPoint: 'fs_main',
+        targets: [{
+          format: hdrFormat,
+          blend: {
+            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+            alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    renderer.lensFlareLayout = lensFlareLayout;
+    renderer.lensFlareUniformBuffer = device.createBuffer({
+      label: 'Lens Flare Uniform',
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
 
     return renderer;
   }
@@ -790,6 +919,7 @@ export class Renderer {
     this.hdrTexture.destroy();
     this.shadowBufferTexture.destroy();
     this.skyAerialTexture.destroy();
+    this.lensFlareDownTexture.destroy();
 
     // Recreate depth texture
     const depth = createDepthTexture(this.device, width, height);
@@ -820,6 +950,16 @@ export class Renderer {
     const skyAerial = createRenderTexture(this.device, width, height, 'rgba16float', 'Sky Aerial');
     this.skyAerialTexture = skyAerial.texture;
     this.skyAerialView = skyAerial.view;
+
+    const lfDown = createRenderTexture(
+      this.device,
+      Math.max(1, width >> 2),
+      Math.max(1, height >> 2),
+      'rgba16float',
+      'Lens Flare Downsample',
+    );
+    this.lensFlareDownTexture = lfDown.texture;
+    this.lensFlareDownView = lfDown.view;
   }
 
   render(
@@ -837,6 +977,8 @@ export class Renderer {
     hazeDensity: number,
     fogDensity: number,
     fogFalloff: number,
+    dt: number,
+    sunOccSpeed: number,
   ): void {
     // Update per-frame uniforms (reuse pre-allocated buffers)
     for (let i = 0; i < 16; i++) {
@@ -875,20 +1017,31 @@ export class Renderer {
     this.lightingView.setFloat32(96, hazeDensity, true);
     this.lightingView.setFloat32(100, fogDensity, true);
     this.lightingView.setFloat32(104, fogFalloff, true);
-    // sun_screen: project sun direction (at infinity, w=0) into screen UV
+    // Sun screen UV for occlusion compute pass + lens flare
+    let sunScreenU = 0;
+    let sunScreenV = 0;
+    let sunScreenWeight = 0;
     {
       const lx = lightDir[0], ly = lightDir[1], lz = lightDir[2];
       const cx = vpMatrix[0]*lx + vpMatrix[4]*ly + vpMatrix[8]*lz;
       const cy = vpMatrix[1]*lx + vpMatrix[5]*ly + vpMatrix[9]*lz;
       const cw = vpMatrix[3]*lx + vpMatrix[7]*ly + vpMatrix[11]*lz;
       const inFront = cw > 0;
-      const u = inFront ? Math.max(0, Math.min(1, cx / cw * 0.5 + 0.5)) : 0;
-      const v = inFront ? Math.max(0, Math.min(1, cy / cw * 0.5 + 0.5)) : 0;
-      // offset 112: sun_screen vec4 (after _pad at 108)
-      this.lightingView.setFloat32(112, u, true);
-      this.lightingView.setFloat32(116, v, true);
-      this.lightingView.setFloat32(120, inFront ? 1.0 : 0.0, true);
+      const ndcX = inFront ? cx / cw : 2;
+      const ndcY = inFront ? cy / cw : 2;
+      const edgeDist = Math.min(1 - Math.abs(ndcX), 1 - Math.abs(ndcY));
+      // Smooth fade: 0 at edge/off-screen, 1 when sun is well inside viewport
+      const weight = Math.max(0, Math.min(1, edgeDist * 5));
+      sunScreenU = inFront ? Math.max(0, Math.min(1, ndcX * 0.5 + 0.5)) : 0;
+      sunScreenV = inFront ? Math.max(0, Math.min(1, ndcY * 0.5 + 0.5)) : 0;
+      sunScreenWeight = weight;
+      this.sunOcclusionView.setFloat32(0, sunScreenU, true);
+      this.sunOcclusionView.setFloat32(4, sunScreenV, true);
+      this.sunOcclusionView.setFloat32(8, weight, true);
+      this.sunOcclusionView.setFloat32(12, dt, true);
+      this.sunOcclusionView.setFloat32(16, sunOccSpeed, true);
     }
+    this.queue.writeBuffer(this.sunOcclusionUniform, 0, this.sunOcclusionData);
     this.queue.writeBuffer(this.lightingUniformBuffer, 0, this.lightingData);
 
     // Create per-frame bind group
@@ -1049,6 +1202,24 @@ export class Renderer {
         pass.end();
       }
 
+      // Compute sun occlusion (soft, multi-sample depth test)
+      {
+        const pass = encoder.beginComputePass({ label: 'Sun Occlusion Pass' });
+        const bg = this.device.createBindGroup({
+          label: 'Sun Occlusion BG',
+          layout: this.sunOcclusionLayout,
+          entries: [
+            { binding: 0, resource: this.depthOnlyView },
+            { binding: 1, resource: { buffer: this.sunOcclusionUniform } },
+            { binding: 2, resource: { buffer: this.sunOcclusionBuffer } },
+          ],
+        });
+        pass.setPipeline(this.sunOcclusionPipeline);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+      }
+
       // Lit mode: lighting shader composites sky/aerial + lit scene → HDR
       {
         const pass = encoder.beginRenderPass({
@@ -1073,10 +1244,67 @@ export class Renderer {
             { binding: 6, resource: this.skyAerialView },
             { binding: 7, resource: this.skyRenderer.resources.transmittanceLut.view },
             { binding: 8, resource: this.skyRenderer.resources.lutSampler },
+            { binding: 9, resource: { buffer: this.sunOcclusionBuffer } },
           ],
         });
         pass.setPipeline(this.lightingPipeline);
         pass.setBindGroup(0, lightingBind);
+        pass.draw(3);
+        pass.end();
+      }
+
+      // Lens flare pass 1: downsample HDR + brightness threshold → 1/4 res
+      {
+        const pass = encoder.beginRenderPass({
+          label: 'Lens Flare Downsample Pass',
+          colorAttachments: [{
+            view: this.lensFlareDownView,
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          }],
+        });
+        const lfDownBind = this.device.createBindGroup({
+          label: 'Lens Flare Downsample BG',
+          layout: this.lensFlareDownLayout,
+          entries: [
+            { binding: 0, resource: this.hdrView },
+            { binding: 1, resource: this.linearSampler },
+          ],
+        });
+        pass.setPipeline(this.lensFlareDownPipeline);
+        pass.setBindGroup(0, lfDownBind);
+        pass.draw(3);
+        pass.end();
+      }
+
+      // Lens flare pass 2: Chapman ghosts + halo + chromatic → additive onto HDR
+      {
+        const sunAbove = Math.max(0, Math.min(1, lightDir[1] * 20 + 1));
+        this.lensFlareView.setFloat32(0, sunScreenWeight * sunAbove, true); // weight
+        this.lensFlareView.setFloat32(4, 1.0, true); // intensity
+        this.queue.writeBuffer(this.lensFlareUniformBuffer, 0, this.lensFlareData);
+
+        const pass = encoder.beginRenderPass({
+          label: 'Lens Flare Feature Pass',
+          colorAttachments: [{
+            view: this.hdrView,
+            loadOp: 'load',
+            storeOp: 'store',
+          }],
+        });
+        const lfBind = this.device.createBindGroup({
+          label: 'Lens Flare BG',
+          layout: this.lensFlareLayout,
+          entries: [
+            { binding: 0, resource: this.lensFlareDownView },
+            { binding: 1, resource: this.linearSampler },
+            { binding: 2, resource: { buffer: this.lensFlareUniformBuffer } },
+            { binding: 3, resource: { buffer: this.sunOcclusionBuffer } },
+          ],
+        });
+        pass.setPipeline(this.lensFlarePipeline);
+        pass.setBindGroup(0, lfBind);
         pass.draw(3);
         pass.end();
       }

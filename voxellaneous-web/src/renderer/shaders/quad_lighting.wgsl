@@ -12,8 +12,6 @@ struct LightingUniforms {
     haze_density:       f32,
     fog_density:        f32,
     fog_falloff:        f32,
-    _pad:               f32,
-    sun_screen:         vec4<f32>,   // .xy = screen UV, .z = 1 if sun in front of camera
 };
 
 // Earth atmosphere constants (km) matching webgpu-sky-atmosphere
@@ -43,6 +41,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
 @group(0) @binding(6) var sky_aerial_tex: texture_2d<f32>;
 @group(0) @binding(7) var transmittance_lut: texture_2d<f32>;
 @group(0) @binding(8) var lut_sampler: sampler;
+@group(0) @binding(9) var<storage, read> sun_occlusion: array<f32, 1>;
 
 // Matches webgpu-sky-atmosphere transmittance_lut_params_to_uv
 fn transmittance_lut_uv(view_height: f32, cos_view_zenith: f32) -> vec2<f32> {
@@ -124,17 +123,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let dist = length(ray);
     let ray_dir = ray / max(dist, 0.001);
 
-    // Check if sun is occluded by terrain: depth test at sun's screen position
-    var sun_occluded = 0.0;
-    if u_lighting.sun_screen.z > 0.5 {
-        let sun_coord = clamp(vec2<i32>(
-            i32(u_lighting.sun_screen.x * f32(dims.x)),
-            i32((1.0 - u_lighting.sun_screen.y) * f32(dims.y))
-        ), vec2<i32>(0), vec2<i32>(dims) - 1);
-        let sd = textureLoad(depth_tex, sun_coord, 0);
-        // Reverse-Z: sky = exactly 0, any geometry > 0
-        sun_occluded = select(0.0, 1.0, sd > 0.0);
-    }
+    // Sun occlusion from compute pass (soft, multi-sample)
+    let sun_occluded = sun_occlusion[0];
 
     // 1) Atmospheric haze — blends toward aerial perspective
     let haze = clamp(1.0 - exp(-u_lighting.haze_density * dist), 0.0, 1.0);

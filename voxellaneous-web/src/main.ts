@@ -80,6 +80,7 @@ export type AppData = {
   fogDensity: number;
   fogFalloff: number;
   sunTimeScale: number;
+  sunOccSpeed: number;
   sponzaPosition: { x: number; y: number; z: number };
   repositionSponza?: () => void;
 };
@@ -131,7 +132,7 @@ async function initializeApp(): Promise<AppData> {
     presentTarget: 4, // Default to Lit mode
     sunTime: 8,
     sunAngle: 260,
-    ambient: 0.1,
+    ambient: 0.15,
     sunIlluminance: 10,
     sunDiskScale: 0.8,
     sunDiskSize: 2, // 0.545,
@@ -142,6 +143,7 @@ async function initializeApp(): Promise<AppData> {
     fogDensity: 0,
     fogFalloff: 0.01,
     sunTimeScale: 0,
+    sunOccSpeed: 0.5,
     sponzaPosition: { x: 3770, y: 755, z: 620 },
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
@@ -318,6 +320,8 @@ async function initializeApp(): Promise<AppData> {
       app.hazeDensity,
       app.fogDensity,
       app.fogFalloff,
+      dt,
+      app.sunOccSpeed,
     );
   };
   registerRecurringAnimation(render);
