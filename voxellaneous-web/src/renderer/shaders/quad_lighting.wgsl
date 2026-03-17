@@ -139,7 +139,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // 2) Ground/cloud fog — Quilez height fog, tinted by sun color
     let fog = height_fog(cam.y, ray_dir.y, dist, u_lighting.fog_density, u_lighting.fog_falloff);
     let day_brightness = smoothstep(-0.1, 0.2, light_dir.y);
-    let fog_color = sun_color * day_brightness;
+    let sun_lum = dot(sun_color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let fog_color = mix(vec3<f32>(sun_lum), sun_color, 0.4) * day_brightness;
     let result = mix(after_haze, fog_color, fog);
 
     return vec4<f32>(result, 1.0);
