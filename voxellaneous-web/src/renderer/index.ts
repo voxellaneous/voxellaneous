@@ -515,10 +515,18 @@ export class Renderer {
     const shadowLayout = device.createBindGroupLayout({
       label: 'Shadow Bind Group Layout',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '2d' },
+        },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d' } },
-        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' },
+        },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     });
@@ -536,7 +544,11 @@ export class Renderer {
     const quadLayoutGrayscale = device.createBindGroupLayout({
       label: 'Quad Grayscale Layout',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '2d' },
+        },
       ],
     });
     const grayscaleShader = device.createShaderModule({ label: 'Quad Grayscale Shader', code: quadGrayscaleWgsl });
@@ -846,7 +858,10 @@ export class Renderer {
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       ],
     });
-    const lfDownShader = device.createShaderModule({ label: 'Lens Flare Downsample Shader', code: lensFlareDownsampleWgsl });
+    const lfDownShader = device.createShaderModule({
+      label: 'Lens Flare Downsample Shader',
+      code: lensFlareDownsampleWgsl,
+    });
     renderer.lensFlareDownPipeline = device.createRenderPipeline({
       label: 'Lens Flare Downsample Pipeline',
       layout: device.createPipelineLayout({ bindGroupLayouts: [lensFlareDownLayout] }),
@@ -885,13 +900,15 @@ export class Renderer {
       fragment: {
         module: lensFlareShader,
         entryPoint: 'fs_main',
-        targets: [{
-          format: hdrFormat,
-          blend: {
-            color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-            alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+        targets: [
+          {
+            format: hdrFormat,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+              alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' },
+            },
           },
-        }],
+        ],
       },
       primitive: { topology: 'triangle-list' },
     });
@@ -1022,10 +1039,12 @@ export class Renderer {
     let sunScreenV = 0;
     let sunScreenWeight = 0;
     {
-      const lx = lightDir[0], ly = lightDir[1], lz = lightDir[2];
-      const cx = vpMatrix[0]*lx + vpMatrix[4]*ly + vpMatrix[8]*lz;
-      const cy = vpMatrix[1]*lx + vpMatrix[5]*ly + vpMatrix[9]*lz;
-      const cw = vpMatrix[3]*lx + vpMatrix[7]*ly + vpMatrix[11]*lz;
+      const lx = lightDir[0],
+        ly = lightDir[1],
+        lz = lightDir[2];
+      const cx = vpMatrix[0] * lx + vpMatrix[4] * ly + vpMatrix[8] * lz;
+      const cy = vpMatrix[1] * lx + vpMatrix[5] * ly + vpMatrix[9] * lz;
+      const cw = vpMatrix[3] * lx + vpMatrix[7] * ly + vpMatrix[11] * lz;
       const inFront = cw > 0;
       const ndcX = inFront ? cx / cw : 2;
       const ndcY = inFront ? cy / cw : 2;
@@ -1162,12 +1181,14 @@ export class Renderer {
 
       const pass = encoder.beginRenderPass({
         label: 'Shadow Buffer Pass',
-        colorAttachments: [{
-          view: this.shadowBufferView,
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        }],
+        colorAttachments: [
+          {
+            view: this.shadowBufferView,
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
       });
       const shadowBind = this.device.createBindGroup({
         label: 'Shadow BG',
@@ -1191,12 +1212,14 @@ export class Renderer {
       {
         const pass = encoder.beginRenderPass({
           label: 'Sky Aerial Pass',
-          colorAttachments: [{
-            view: this.skyAerialView,
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          }],
+          colorAttachments: [
+            {
+              view: this.skyAerialView,
+              clearValue: { r: 0, g: 0, b: 0, a: 0 },
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
         });
         this.skyRenderer.renderSky(pass);
         pass.end();
@@ -1224,12 +1247,14 @@ export class Renderer {
       {
         const pass = encoder.beginRenderPass({
           label: 'HDR Pass',
-          colorAttachments: [{
-            view: this.hdrView,
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          }],
+          colorAttachments: [
+            {
+              view: this.hdrView,
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
         });
         const lightingBind = this.device.createBindGroup({
           label: 'Lighting BG',
@@ -1257,12 +1282,14 @@ export class Renderer {
       {
         const pass = encoder.beginRenderPass({
           label: 'Lens Flare Downsample Pass',
-          colorAttachments: [{
-            view: this.lensFlareDownView,
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            loadOp: 'clear',
-            storeOp: 'store',
-          }],
+          colorAttachments: [
+            {
+              view: this.lensFlareDownView,
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
         });
         const lfDownBind = this.device.createBindGroup({
           label: 'Lens Flare Downsample BG',
@@ -1287,11 +1314,13 @@ export class Renderer {
 
         const pass = encoder.beginRenderPass({
           label: 'Lens Flare Feature Pass',
-          colorAttachments: [{
-            view: this.hdrView,
-            loadOp: 'load',
-            storeOp: 'store',
-          }],
+          colorAttachments: [
+            {
+              view: this.hdrView,
+              loadOp: 'load',
+              storeOp: 'store',
+            },
+          ],
         });
         const lfBind = this.device.createBindGroup({
           label: 'Lens Flare BG',
@@ -1626,7 +1655,7 @@ export class Renderer {
       if (manager.dirty[i]) {
         this.queue.writeTexture(
           { texture: this.shadowClipmapTexture, origin: { x: 0, y: 0, z: i } },
-          manager.levels[i],
+          manager.levels[i] as GPUAllowSharedBufferSource,
           { bytesPerRow: SHADOW_CLIPMAP_SIZE * 4 },
           { width: SHADOW_CLIPMAP_SIZE, height: SHADOW_CLIPMAP_SIZE, depthOrArrayLayers: 1 },
         );
