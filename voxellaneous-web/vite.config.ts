@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/voxellaneous/',
+  base: '/',
   assetsInclude: ['**/*.wgsl'],
   build: {
     target: 'esnext',
