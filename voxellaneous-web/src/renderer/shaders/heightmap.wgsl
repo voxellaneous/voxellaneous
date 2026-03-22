@@ -38,6 +38,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+const HEIGHTMAP_MAX_STEPS: u32 = 128u;
+
 @fragment
 fn fs_main(in: VertexOutput) -> GBuffer {
     let cam_os = (u_draw.inv_model_matrix * vec4<f32>(u_frame.cam_pos_ws, 1.0)).xyz;
@@ -115,9 +117,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
     let voxel_size = 1.0 / dims_f;
     var t_current = 0.0;
 
-    let MAX_STEPS = 128u;
-
-    for (var i = 0u; i < MAX_STEPS; i = i + 1u) {
+    for (var i = 0u; i < HEIGHTMAP_MAX_STEPS; i = i + 1u) {
         if voxel_x < 0 || voxel_x >= dims_i || voxel_z < 0 || voxel_z >= dims_i {
             break;
         }

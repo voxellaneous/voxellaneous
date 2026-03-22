@@ -18,10 +18,11 @@ export function columnLodKey(x: number, z: number, lod: number): number {
   return ((x + COORD_OFFSET) * COORD_RANGE + (z + COORD_OFFSET)) * LOD_RANGE + lod;
 }
 
-const MAX_PENDING_REQUESTS = 64;
+const DEFAULT_MAX_PENDING_REQUESTS = 64;
 
 export class ChunkManager {
   private config: TerrainConfig;
+  private maxPendingRequests: number;
   private worker: Worker;
   private chunks: Map<number, Chunk> = new Map();
   private pendingChunks: Set<number> = new Set();
@@ -34,8 +35,9 @@ export class ChunkManager {
   /** Monotonic counter — increments on every cache insertion so consumers know when to rescan */
   private _cacheGeneration = 0;
 
-  constructor(config: Partial<TerrainConfig> = {}) {
+  constructor(config: Partial<TerrainConfig> = {}, maxPendingRequests = DEFAULT_MAX_PENDING_REQUESTS) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config };
+    this.maxPendingRequests = maxPendingRequests;
 
     this.worker = new Worker(new URL('./terrain-worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = this.handleWorkerMessage.bind(this);
@@ -170,7 +172,7 @@ export class ChunkManager {
       return;
     }
 
-    if (this.pendingChunks.size >= MAX_PENDING_REQUESTS) return;
+    if (this.pendingChunks.size >= this.maxPendingRequests) return;
 
     this.pendingChunks.add(key);
 
@@ -305,7 +307,7 @@ export class ChunkManager {
     if (candidates.length === 0) return;
     candidates.sort((a, b) => a.dist - b.dist);
 
-    const maxToQueue = MAX_PENDING_REQUESTS - this.pendingChunks.size;
+    const maxToQueue = this.maxPendingRequests - this.pendingChunks.size;
     for (let i = 0; i < Math.min(candidates.length, maxToQueue); i++) {
       this.requestChunkGeneration(candidates[i].x, candidates[i].z, candidates[i].lod);
     }

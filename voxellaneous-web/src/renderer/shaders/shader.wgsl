@@ -39,6 +39,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+const VOXEL_MAX_STEPS: u32 = 2048u;
+
 @fragment
 fn fs_main(in: VertexOutput) -> GBuffer {
     // Transform camera position to object space
@@ -103,8 +105,7 @@ fn fs_main(in: VertexOutput) -> GBuffer {
         last_axis = 2;
     }
 
-    let MAX_STEPS = 2048u;
-    for (var i = 0u; i < MAX_STEPS; i = i + 1u) {
+    for (var i = 0u; i < VOXEL_MAX_STEPS; i = i + 1u) {
         if any(voxel < vec3<i32>(0)) || any(voxel >= vec3<i32>(dims)) {
             break;
         }

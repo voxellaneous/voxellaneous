@@ -102,8 +102,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Decode normal from [0,1] to [-1,1]
     let normal = normalize(normal_encoded.rgb * 2.0 - 1.0);
 
-    // Read shadow from precomputed shadow buffer (R channel)
-    let shadow = textureLoad(shadow_tex, coord, 0).r;
+    // Read shadow from precomputed shadow buffer (R channel, may be lower res)
+    let shadow_dims = textureDimensions(shadow_tex, 0);
+    let shadow_coord = vec2<i32>(
+        i32(in.uv.x * f32(shadow_dims.x)),
+        i32((1.0 - in.uv.y) * f32(shadow_dims.y))
+    );
+    let shadow = textureLoad(shadow_tex, shadow_coord, 0).r;
 
     // N dot L shading with sun color; no direct light when sun is below horizon
     let sun_above = smoothstep(-0.05, 0.05, light_dir.y);

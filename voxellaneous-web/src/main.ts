@@ -2,6 +2,7 @@ import { CameraModule } from './camera';
 import './style.css';
 
 import { Renderer } from './renderer';
+import { isMobileDevice, MOBILE_QUALITY, DESKTOP_QUALITY } from './renderer/types';
 import { initializeDevTools } from './editor';
 import { importFromBinary, createSceneFromResult } from './converter';
 import { VoxelObject, RGBA } from './scene';
@@ -123,7 +124,8 @@ async function initializeApp(): Promise<AppData> {
   const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
   const network = new NetworkClient({ url: wsUrl, roomId });
 
-  const renderer = await Renderer.new(canvas);
+  const quality = isMobileDevice() ? MOBILE_QUALITY : DESKTOP_QUALITY;
+  const renderer = await Renderer.new(canvas, quality);
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0, 0, 1]));
   cameraModule.setPosition([3770, 300, 620]); // Above terrain level
@@ -146,7 +148,7 @@ async function initializeApp(): Promise<AppData> {
     fogFalloff: 0.01,
     sunTimeScale: 0,
     sunOccSpeed: 0.5,
-    sponzaPosition: { x: 3770, y: 755, z: 620 },
+    sponzaPosition: quality === MOBILE_QUALITY ? { x: 3770, y: 500, z: 620 } : { x: 3770, y: 755, z: 620 },
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
 
@@ -155,7 +157,8 @@ async function initializeApp(): Promise<AppData> {
   // Load sponza scene
   let sponzaBaseObjects: VoxelObject[] = [];
   try {
-    const response = await fetch('/resources/sponza.voxgz');
+    const sponzaFile = quality === MOBILE_QUALITY ? 'sponza-small.voxgz' : 'sponza.voxgz';
+    const response = await fetch(`/resources/${sponzaFile}`);
     if (response.ok) {
       const blob = await response.blob();
       const file = new File([blob], 'sponza.voxgz');
@@ -172,7 +175,7 @@ async function initializeApp(): Promise<AppData> {
 
   // Initialize terrain manager with LOD levels
   // Uses DEFAULT_TERRAIN_CONFIG for noise layers and other defaults
-  const terrainManager = new ChunkManager();
+  const terrainManager = new ChunkManager({ lodLevels: quality.lodLevels }, quality.maxPendingChunkRequests);
   app.terrainManager = terrainManager;
 
   const shadowClipmap = new ShadowClipmapManager(terrainManager.getChunkCache(), terrainManager.getConfig());

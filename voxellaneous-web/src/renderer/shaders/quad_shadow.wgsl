@@ -108,6 +108,14 @@ fn sample_height_from(world_x: f32, world_z: f32, min_level: i32) -> f32 {
     return -1e6;
 }
 
+// Shadow quality constants (replaced at pipeline creation for mobile)
+const SHADOW_NEAR_SAMPLES: i32 = 14;
+const SHADOW_NEAR_STEP: f32 = 32.0;
+const SHADOW_MID_SAMPLES: i32 = 32;
+const SHADOW_MID_STEP: f32 = 128.0;
+const SHADOW_FAR_SAMPLES: i32 = 32;
+const SHADOW_FAR_STEP: f32 = 512.0;
+
 fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     let horiz = vec2<f32>(light_dir.x, light_dir.z);
     let horiz_len = length(horiz);
@@ -122,34 +130,34 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     let self_y = world_pos.y + 4.0;
 
     var t = 64.0;
-    for (var i = 0; i < 14; i++) {
+    for (var i = 0; i < SHADOW_NEAR_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
         let h = sample_height_from(sx, sz, 1);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
         }
-        t += 32.0;
+        t += SHADOW_NEAR_STEP;
     }
 
-    for (var i = 0; i < 32; i++) {
+    for (var i = 0; i < SHADOW_MID_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
         let h = sample_height_from(sx, sz, 2);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
         }
-        t += 128.0;
+        t += SHADOW_MID_STEP;
     }
 
-    for (var i = 0; i < 32; i++) {
+    for (var i = 0; i < SHADOW_FAR_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
         let h = sample_height_from(sx, sz, 3);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
         }
-        t += 512.0;
+        t += SHADOW_FAR_STEP;
     }
 
     let penumbra_tan = 0.03;

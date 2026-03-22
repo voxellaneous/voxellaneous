@@ -3,10 +3,10 @@
  * Ported from Rust/wgpu to TypeScript/WebGPU
  */
 
-import { DrawCallData, Scene, UNIFORM_SIZES, RGBA, SceneObject as VoxelObject } from './types';
+import { DrawCallData, Scene, UNIFORM_SIZES, RGBA, SceneObject as VoxelObject, QualityPreset, DESKTOP_QUALITY } from './types';
 import type { HeightmapObject } from '../scene';
 import { CUBE_VERTICES, CUBE_INDICES, CUBE_EDGE_INDICES, VERTEX_STRIDE } from './constants';
-import { packRGBATuple } from './utils';
+import { packRGBATuple, patchWgslConstants } from './utils';
 import { SkyAtmosphereRasterRenderer, makeEarthAtmosphere } from 'webgpu-sky-atmosphere';
 import type { Uniforms as SkyUniforms } from 'webgpu-sky-atmosphere';
 import type { ShadowClipmapManager } from '../terrain/shadow-clipmap';
@@ -104,12 +104,15 @@ export class Renderer {
   private skyAerialTexture!: GPUTexture;
   private skyAerialView!: GPUTextureView;
 
-  // Shadow buffer (screen-sized, written by shadow pass, read by lighting)
+  // Shadow buffer (screen-sized or scaled, written by shadow pass, read by lighting)
   private shadowBufferTexture!: GPUTexture;
   private shadowBufferView!: GPUTextureView;
   private shadowPipeline!: GPURenderPipeline;
   private shadowLayout!: GPUBindGroupLayout;
   private shadowUniformBuffer!: GPUBuffer;
+
+  /** Quality settings (desktop vs mobile) */
+  readonly quality!: QualityPreset;
 
   // Shadow clipmap
   private shadowClipmapTexture!: GPUTexture;
@@ -192,7 +195,7 @@ export class Renderer {
     this.sampler = sampler;
   }
 
-  static async new(canvas: HTMLCanvasElement): Promise<Renderer> {
+  static async new(canvas: HTMLCanvasElement, quality: QualityPreset = DESKTOP_QUALITY): Promise<Renderer> {
     if (!navigator.gpu) {
       throw new Error('WebGPU is not supported in this browser');
     }
@@ -241,10 +244,10 @@ export class Renderer {
       depthOnlyView,
     } = createDepthTexture(device, canvasWidth, canvasHeight);
 
-    // Create shader modules
+    // Create shader modules — inject quality settings via constant patching
     const shader = device.createShaderModule({
       label: 'Shader',
-      code: shaderWgsl,
+      code: patchWgslConstants(shaderWgsl, { VOXEL_MAX_STEPS: quality.voxelMaxSteps }),
     });
 
     // Create vertex buffer
@@ -425,7 +428,7 @@ export class Renderer {
             viewDimension: '2d',
           },
         },
-        // Shadow buffer (precomputed by shadow pass)
+        // Shadow buffer (precomputed by shadow pass, may be lower res)
         {
           binding: 5,
           visibility: GPUShaderStage.FRAGMENT,
@@ -531,7 +534,17 @@ export class Renderer {
       ],
     });
 
-    const shadowShader = device.createShaderModule({ label: 'Shadow Shader', code: quadShadowWgsl });
+    const shadowShader = device.createShaderModule({
+      label: 'Shadow Shader',
+      code: patchWgslConstants(quadShadowWgsl, {
+        SHADOW_NEAR_SAMPLES: quality.shadowSamples[0],
+        SHADOW_NEAR_STEP: quality.shadowSteps[0],
+        SHADOW_MID_SAMPLES: quality.shadowSamples[1],
+        SHADOW_MID_STEP: quality.shadowSteps[1],
+        SHADOW_FAR_SAMPLES: quality.shadowSamples[2],
+        SHADOW_FAR_STEP: quality.shadowSteps[2],
+      }),
+    });
     const shadowPipeline = device.createRenderPipeline({
       label: 'Shadow Pipeline',
       layout: device.createPipelineLayout({ label: 'Shadow Pipeline Layout', bindGroupLayouts: [shadowLayout] }),
@@ -666,7 +679,7 @@ export class Renderer {
 
     const heightmapShader = device.createShaderModule({
       label: 'Heightmap Shader',
-      code: heightmapWgsl,
+      code: patchWgslConstants(heightmapWgsl, { HEIGHTMAP_MAX_STEPS: quality.heightmapMaxSteps }),
     });
 
     const heightmapPipelineLayout = device.createPipelineLayout({
@@ -742,6 +755,7 @@ export class Renderer {
       sampler,
     );
 
+    (renderer as { quality: QualityPreset }).quality = quality;
     renderer.heightmapPipeline = heightmapPipeline;
     renderer.heightmapPerDrawBindGroupLayout = heightmapPerDrawBindGroupLayout;
 
@@ -822,7 +836,9 @@ export class Renderer {
       size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    const shadowBuf = createRenderTexture(device, canvas.width, canvas.height, 'r8unorm', 'Shadow Buffer');
+    const esW = Math.max(1, Math.round(canvas.width * renderer.quality.effectScale));
+    const esH = Math.max(1, Math.round(canvas.height * renderer.quality.effectScale));
+    const shadowBuf = createRenderTexture(device, esW, esH, 'r8unorm', 'Shadow Buffer');
     renderer.shadowBufferTexture = shadowBuf.texture;
     renderer.shadowBufferView = shadowBuf.view;
 
@@ -840,7 +856,7 @@ export class Renderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    const skyAerial = createRenderTexture(device, canvas.width, canvas.height, hdrFormat, 'Sky Aerial');
+    const skyAerial = createRenderTexture(device, canvasWidth, canvasHeight, hdrFormat, 'Sky Aerial');
     renderer.skyAerialTexture = skyAerial.texture;
     renderer.skyAerialView = skyAerial.view;
 
@@ -960,7 +976,9 @@ export class Renderer {
     this.hdrTexture = hdr.texture;
     this.hdrView = hdr.view;
 
-    const shadowBuf = createRenderTexture(this.device, width, height, 'r8unorm', 'Shadow Buffer');
+    const esW = Math.max(1, Math.round(width * this.quality.effectScale));
+    const esH = Math.max(1, Math.round(height * this.quality.effectScale));
+    const shadowBuf = createRenderTexture(this.device, esW, esH, 'r8unorm', 'Shadow Buffer');
     this.shadowBufferTexture = shadowBuf.texture;
     this.shadowBufferView = shadowBuf.view;
 

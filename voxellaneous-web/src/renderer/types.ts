@@ -70,3 +70,45 @@ export const UNIFORM_SIZES = {
   PER_DRAW: 1152,  // 128 (matrices) + 1024 (palette)
   LIGHTING: 112,
 } as const;
+
+/** Quality settings that differ between desktop and mobile. */
+export interface QualityPreset {
+  /** Max DDA steps for voxel raymarching (desktop: 2048, mobile: 512) */
+  voxelMaxSteps: number;
+  /** Max DDA steps for heightmap raymarching (desktop: 128, mobile: 64) */
+  heightmapMaxSteps: number;
+  /** Resolution scale for shadow buffer (1.0 = full, 0.5 = half) */
+  effectScale: number;
+  /** Shadow sample counts per clipmap tier [near, mid, far] (desktop: [14,32,32], mobile: [7,16,16]) */
+  shadowSamples: [number, number, number];
+  /** Shadow step sizes per tier (desktop: [32,128,512], mobile: [64,256,1024]) */
+  shadowSteps: [number, number, number];
+  /** Max concurrent chunk generation requests (desktop: 64, mobile: 16) */
+  maxPendingChunkRequests: number;
+  /** LOD level render distances — fewer/shorter on mobile */
+  lodLevels: number[];
+}
+
+export const DESKTOP_QUALITY: QualityPreset = {
+  voxelMaxSteps: 2048,
+  heightmapMaxSteps: 128,
+  effectScale: 1.0,
+  shadowSamples: [14, 32, 32],
+  shadowSteps: [32, 128, 512],
+  maxPendingChunkRequests: 64,
+  lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+};
+
+export const MOBILE_QUALITY: QualityPreset = {
+  voxelMaxSteps: 512,
+  heightmapMaxSteps: 64,
+  effectScale: 0.5,
+  shadowSamples: [7, 16, 16],
+  shadowSteps: [64, 256, 1024],
+  maxPendingChunkRequests: 16,
+  lodLevels: [8, 16, 32, 64, 128, 256, 512],
+};
+
+export function isMobileDevice(): boolean {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
+}

@@ -1,30 +1,28 @@
 import { Pane } from 'tweakpane';
 import { AppData } from './main';
-import { initializeRendererTools, initializeRendererBackendInfo } from './renderer/editor';
+import { initializeRendererTools } from './renderer/editor';
 import { ProfilerData } from './profiler-data';
 import { initializeConverterUI } from './converter-ui';
 import { NoiseLayer } from './terrain/types';
 
 export function initializeDevTools(app: AppData, profilerData: ProfilerData): void {
   const isMobile = window.matchMedia('(pointer: coarse)').matches;
-  const pane = new Pane();
+  const pane = new Pane({
+    title: isMobile ? 'Settings' : undefined,
+    expanded: !isMobile,
+  });
 
-  if (isMobile) {
-    const perfFolder = pane.addFolder({ title: 'Performance' });
-    perfFolder.addBinding(profilerData, 'fps', { label: 'FPS', readonly: true, format: (v) => v.toFixed(0) });
-    initializeRendererBackendInfo(pane, app);
-    return;
+  initializeRendererTools(pane, app, profilerData, isMobile);
+  if (!isMobile) {
+    initializeConverterUI(pane, app);
   }
-
-  initializeRendererTools(pane, app, profilerData);
-  initializeConverterUI(pane, app);
-  initializeCameraControls(pane, app);
+  initializeCameraControls(pane, app, isMobile);
   initializeTerrainControls(pane, app);
 }
 
-function initializeCameraControls(pane: Pane, app: AppData): void {
+function initializeCameraControls(pane: Pane, app: AppData, collapsed = false): void {
   if (app.cameraModule) {
-    const folder = pane.addFolder({ title: 'Camera' });
+    const folder = pane.addFolder({ title: 'Camera', expanded: !collapsed });
 
     folder
       .addBinding(app, 'cameraSpeed', {

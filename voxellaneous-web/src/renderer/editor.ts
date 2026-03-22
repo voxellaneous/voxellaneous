@@ -20,8 +20,8 @@ export function initializeRendererBackendInfo(pane: Pane, app: AppData): void {
   backendFolder.addBinding(gpuData, 'backend', { label: 'Backend', readonly: true });
 }
 
-export function initializeRendererTools(pane: Pane, app: AppData, profilerData: ProfilerData): void {
-  const settingsFolder = pane.addFolder({ title: 'Renderer Settings' });
+export function initializeRendererTools(pane: Pane, app: AppData, profilerData: ProfilerData, collapsed = false): void {
+  const settingsFolder = pane.addFolder({ title: 'Renderer Settings', expanded: !collapsed });
   settingsFolder.addBinding(app, 'presentTarget', {
     label: 'Render Target',
     options: [
@@ -36,7 +36,7 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     label: 'Show Bounding Boxes',
   });
 
-  const sunFolder = pane.addFolder({ title: 'Sun' });
+  const sunFolder = pane.addFolder({ title: 'Sun', expanded: !collapsed });
   sunFolder.addBinding(app, 'sunTime', {
     label: 'Time of Day',
     min: 0,
@@ -88,7 +88,7 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     step: 0.01,
   });
 
-  const hazeFolder = pane.addFolder({ title: 'Atmospheric Haze' });
+  const hazeFolder = pane.addFolder({ title: 'Atmospheric Haze', expanded: !collapsed });
   hazeFolder.addBinding(app, 'hazeDensity', {
     label: 'Density',
     min: 0,
@@ -96,7 +96,7 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     step: 0.000005,
   });
 
-  const fogFolder = pane.addFolder({ title: 'Ground Fog' });
+  const fogFolder = pane.addFolder({ title: 'Ground Fog', expanded: !collapsed });
   fogFolder.addBinding(app, 'fogDensity', {
     label: 'Density',
     min: 0,
@@ -112,7 +112,7 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
 
   initializeRendererBackendInfo(pane, app);
 
-  const performanceFolder = pane.addFolder({ title: 'Performance' });
+  const performanceFolder = pane.addFolder({ title: 'Performance', expanded: !collapsed });
   performanceFolder.addBinding(profilerData, 'fps', { label: 'FPS', readonly: true, format: (v) => v.toFixed(2) });
   performanceFolder.addBinding(profilerData, 'frameTime', {
     label: 'Frame Time (ms)',
