@@ -66,6 +66,10 @@ export class CameraModule {
     return this.camera.direction;
   }
 
+  get right(): vec3 {
+    return this.camera.right;
+  }
+
   isFocused(): boolean {
     return document.pointerLockElement === this.canvas;
   }
@@ -177,6 +181,15 @@ export class CameraModule {
   /** Returns true if the given key is currently pressed. */
   isKeyPressed(code: string): boolean {
     return !!this.keysPressedState[code];
+  }
+
+  /** Apply external look delta (e.g. from touch input). Adjusts yaw/pitch and updates direction. */
+  applyLookDelta(dx: number, dy: number): void {
+    this.camera.yaw -= dx;
+    this.camera.pitch -= dy;
+    if (this.camera.pitch > maxCameraPitch) this.camera.pitch = maxCameraPitch;
+    if (this.camera.pitch < -maxCameraPitch) this.camera.pitch = -maxCameraPitch;
+    this.updateCameraDirection();
   }
 
   /** Updates camera direction from mouse input. Call every frame. */

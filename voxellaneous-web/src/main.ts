@@ -12,6 +12,7 @@ import { mat4 } from 'gl-matrix';
 import { ByteArray } from './common/types';
 import { ChunkManager, ShadowClipmapManager } from './terrain';
 import { CharacterController } from './character-controller';
+import { TouchInput } from './touch-input';
 
 const remoteMarkerSize = 4;
 const reusableMvp = new Float32Array(16);
@@ -180,14 +181,23 @@ async function initializeApp(): Promise<AppData> {
   characterController.setFromEyePosition(cameraModule.position);
   app.characterController = characterController;
 
+  const toggleFly = () => {
+    characterController.toggleFlyWalk();
+    if (!characterController.isFlying) {
+      characterController.setFromEyePosition(cameraModule.position);
+    }
+    touchInput?.setFlyActive(characterController.isFlying);
+  };
+
   window.addEventListener('keydown', (e) => {
     if (e.code === 'KeyF' && !e.repeat) {
-      characterController.toggleFlyWalk();
-      if (!characterController.isFlying) {
-        characterController.setFromEyePosition(cameraModule.position);
-      }
+      toggleFly();
     }
   });
+
+  // Touch input for mobile
+  const isMobile = window.matchMedia('(pointer: coarse)').matches;
+  const touchInput = isMobile ? new TouchInput(canvas, toggleFly) : null;
 
   function offsetSponza(base: VoxelObject[], pos: { x: number; y: number; z: number }): VoxelObject[] {
     return base.map((obj) => {
@@ -248,12 +258,40 @@ async function initializeApp(): Promise<AppData> {
     updateProfilerData(profilerData, time);
 
     cameraModule.updateLook();
+
+    // Apply touch look
+    if (touchInput) {
+      const { dx, dy } = touchInput.consumeLookDelta();
+      if (dx !== 0 || dy !== 0) {
+        cameraModule.applyLookDelta(dx, dy);
+      }
+    }
+
+    // Combine keyboard + touch joystick motion
+    const kbMotion = cameraModule.getInputMotion();
+    if (touchInput) {
+      const joy = touchInput.getJoystickVector();
+      if (joy.forward !== 0 || joy.right !== 0) {
+        const [fx, , fz] = cameraModule.direction;
+        const [rx, , rz] = cameraModule.right;
+        kbMotion[0] += fx * joy.forward + rx * joy.right;
+        kbMotion[2] += fz * joy.forward + rz * joy.right;
+        if (characterController.isFlying) {
+          kbMotion[1] += cameraModule.direction[1] * joy.forward;
+        }
+        const len = vec3.length(kbMotion);
+        if (len > 1) vec3.scale(kbMotion, kbMotion, 1 / len);
+      }
+    }
+
     if (characterController.isFlying) {
-      cameraModule.updateFlyMovement(dt);
+      if (vec3.length(kbMotion) > 0) {
+        vec3.scale(kbMotion, kbMotion, cameraModule.speed * dt);
+        vec3.add(cameraModule.position, cameraModule.position, kbMotion);
+      }
     } else {
-      const motion = cameraModule.getInputMotion();
-      const jumpPressed = cameraModule.isKeyPressed('Space');
-      const eyePos = characterController.update(dt, motion, jumpPressed, (x, z) => terrainManager.queryHeight(x, z));
+      const jumpPressed = cameraModule.isKeyPressed('Space') || (touchInput?.jumpPressed ?? false);
+      const eyePos = characterController.update(dt, kbMotion, jumpPressed, (x, z) => terrainManager.queryHeight(x, z));
       cameraModule.setPosition(eyePos);
     }
 

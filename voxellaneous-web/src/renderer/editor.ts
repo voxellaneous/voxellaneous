@@ -12,6 +12,14 @@ type GPUData = {
   backend: string;
 };
 
+export function initializeRendererBackendInfo(pane: Pane, app: AppData): void {
+  const gpuData = app.renderer.get_gpu_info() as GPUData;
+  const backendFolder = pane.addFolder({ title: 'Renderer Backend' });
+  backendFolder.expanded = false;
+  backendFolder.addBinding(gpuData, 'driver', { label: 'Driver', readonly: true });
+  backendFolder.addBinding(gpuData, 'backend', { label: 'Backend', readonly: true });
+}
+
 export function initializeRendererTools(pane: Pane, app: AppData, profilerData: ProfilerData): void {
   const settingsFolder = pane.addFolder({ title: 'Renderer Settings' });
   settingsFolder.addBinding(app, 'presentTarget', {
@@ -102,18 +110,7 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
     step: 0.001,
   });
 
-  const gpuData = app.renderer.get_gpu_info() as GPUData;
-
-  const backendFolder = pane.addFolder({ title: 'Renderer Backend' });
-  backendFolder.expanded = false;
-
-  backendFolder.addBinding(gpuData, 'name', { label: 'Name', readonly: true });
-  backendFolder.addBinding(gpuData, 'vendor', { label: 'Vendor', readonly: true, format: (v) => Math.floor(v) });
-  backendFolder.addBinding(gpuData, 'device', { label: 'Device', readonly: true, format: (v) => Math.floor(v) });
-  backendFolder.addBinding(gpuData, 'device_type', { label: 'Device Type', readonly: true });
-  backendFolder.addBinding(gpuData, 'driver', { label: 'Driver', readonly: true });
-  backendFolder.addBinding(gpuData, 'driver_info', { label: 'Driver Info', readonly: true });
-  backendFolder.addBinding(gpuData, 'backend', { label: 'Backend', readonly: true });
+  initializeRendererBackendInfo(pane, app);
 
   const performanceFolder = pane.addFolder({ title: 'Performance' });
   performanceFolder.addBinding(profilerData, 'fps', { label: 'FPS', readonly: true, format: (v) => v.toFixed(2) });

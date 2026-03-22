@@ -1,12 +1,21 @@
 import { Pane } from 'tweakpane';
 import { AppData } from './main';
-import { initializeRendererTools } from './renderer/editor';
+import { initializeRendererTools, initializeRendererBackendInfo } from './renderer/editor';
 import { ProfilerData } from './profiler-data';
 import { initializeConverterUI } from './converter-ui';
 import { NoiseLayer } from './terrain/types';
 
 export function initializeDevTools(app: AppData, profilerData: ProfilerData): void {
+  const isMobile = window.matchMedia('(pointer: coarse)').matches;
   const pane = new Pane();
+
+  if (isMobile) {
+    const perfFolder = pane.addFolder({ title: 'Performance' });
+    perfFolder.addBinding(profilerData, 'fps', { label: 'FPS', readonly: true, format: (v) => v.toFixed(0) });
+    initializeRendererBackendInfo(pane, app);
+    return;
+  }
+
   initializeRendererTools(pane, app, profilerData);
   initializeConverterUI(pane, app);
   initializeCameraControls(pane, app);
