@@ -117,7 +117,8 @@ function registerRecurringAnimation(f: FrameRequestCallback): void {
 async function initializeApp(): Promise<AppData> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 
-  const wsUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.hostname}:8080`;
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = import.meta.env.VITE_WS_URL || `${wsProtocol}://${window.location.hostname}:8080`;
   const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
   const network = new NetworkClient({ url: wsUrl, roomId });
 
