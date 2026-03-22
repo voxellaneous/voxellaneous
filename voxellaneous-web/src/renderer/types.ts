@@ -100,13 +100,13 @@ export const DESKTOP_QUALITY: QualityPreset = {
 };
 
 export const MOBILE_QUALITY: QualityPreset = {
-  voxelMaxSteps: 512,
-  heightmapMaxSteps: 64,
+  voxelMaxSteps: 256,
+  heightmapMaxSteps: 128,
   effectScale: 0.5,
-  shadowSamples: [7, 16, 16],
-  shadowSteps: [64, 256, 1024],
+  shadowSamples: [4, 8, 8],
+  shadowSteps: [128, 512, 2048],
   maxPendingChunkRequests: 16,
-  lodLevels: [8, 16, 32, 64, 128, 256, 512],
+  lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
 };
 
 export function isMobileDevice(): boolean {

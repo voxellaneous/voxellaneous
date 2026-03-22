@@ -62,7 +62,6 @@ export class TouchInput {
       e.preventDefault();
       e.stopPropagation();
       this.onFlyToggle();
-      this.flyButton.classList.toggle('active');
     });
     this.overlay.appendChild(this.flyButton);
 
