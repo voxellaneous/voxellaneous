@@ -13,6 +13,7 @@ html, body {
 canvas {
     width: 100%;
     height: 100%;
+    touch-action: none;
 }
 
 #loading {
@@ -33,4 +34,82 @@ canvas {
 
 #loading.hidden {
     display: none;
+}
+
+/* Touch controls */
+#touch-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 100;
+}
+
+.touch-joystick-outer {
+    position: fixed;
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+.touch-joystick-inner {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.4);
+    pointer-events: none;
+}
+
+.touch-jump-btn {
+    position: fixed;
+    bottom: 100px;
+    right: 32px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    background: rgba(0, 0, 0, 0.4);
+    color: rgba(255, 255, 255, 0.7);
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: bold;
+    pointer-events: auto;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+.touch-jump-btn:active {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+.touch-fly-btn {
+    position: fixed;
+    bottom: 32px;
+    right: 32px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    background: rgba(0, 0, 0, 0.4);
+    color: rgba(255, 255, 255, 0.7);
+    font-family: monospace;
+    font-size: 12px;
+    font-weight: bold;
+    pointer-events: auto;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+.touch-fly-btn.active {
+    background: rgba(80, 160, 255, 0.5);
+    border-color: rgba(80, 160, 255, 0.8);
+    color: #fff;
 }

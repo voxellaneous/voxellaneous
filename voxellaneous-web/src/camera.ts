@@ -14,6 +14,7 @@ export class CameraModule {
     up: [0, 1, 0] as vec3,
     yaw: 0,
     pitch: 0,
+    speed: 60,
   };
 
   constructor(private canvas: HTMLCanvasElement) {
@@ -32,6 +33,12 @@ export class CameraModule {
     window.addEventListener('mousemove', (event) => {
       this.handleMouseMove(event);
     });
+
+    document.addEventListener('pointerlockchange', () => {
+      if (!this.isFocused()) {
+        this.keysPressedState = {};
+      }
+    });
   }
 
   setPosition(position: vec3) {
@@ -40,6 +47,14 @@ export class CameraModule {
 
   get position(): vec3 {
     return this.camera.position;
+  }
+
+  setSpeed(speed: number) {
+    this.camera.speed = speed;
+  }
+
+  get speed(): number {
+    return this.camera.speed;
   }
 
   setDirection(direction: vec3) {
@@ -52,26 +67,60 @@ export class CameraModule {
     return this.camera.direction;
   }
 
+  get right(): vec3 {
+    return this.camera.right;
+  }
+
   isFocused(): boolean {
     return document.pointerLockElement === this.canvas;
   }
 
-  calculateMVP(): mat4 {
-    const viewMatrix = mat4.create();
+  private buildViewAndProjection(): { view: mat4; projection: mat4 } {
+    const view = mat4.create();
     const cameraTarget: vec3 = [0, 0, 0];
     vec3.add(cameraTarget, this.camera.position, this.camera.direction);
-    mat4.lookAt(viewMatrix, this.camera.position, cameraTarget, this.camera.up);
+    mat4.lookAt(view, this.camera.position, cameraTarget, this.camera.up);
 
     const aspectRatio = this.canvas.width / this.canvas.height;
-    const projectionMatrix = mat4.create();
+    const projection = mat4.create();
+    // Infinite reverse-Z: near→1, far(∞)→0. No far plane clipping.
     const near = 0.1;
-    const far = 10000.0;
-    mat4.perspectiveZO(projectionMatrix, 90 * (Math.PI / 180), aspectRatio, far, near);
+    const f = 1.0 / Math.tan((90 * Math.PI / 180) / 2);
+    // Column-major: [col0, col1, col2, col3]
+    projection[0]  = f / aspectRatio;
+    projection[1]  = 0;
+    projection[2]  = 0;
+    projection[3]  = 0;
+    projection[4]  = 0;
+    projection[5]  = f;
+    projection[6]  = 0;
+    projection[7]  = 0;
+    projection[8]  = 0;
+    projection[9]  = 0;
+    projection[10] = 0;
+    projection[11] = -1;
+    projection[12] = 0;
+    projection[13] = 0;
+    projection[14] = near;
+    projection[15] = 0;
 
+    return { view, projection };
+  }
+
+  calculateMVP(): mat4 {
+    const { view, projection } = this.buildViewAndProjection();
     const mvpMatrix = mat4.create();
-    mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
-
+    mat4.multiply(mvpMatrix, projection, view);
     return mvpMatrix;
+  }
+
+  getCameraMatrices(): { inverseView: mat4; inverseProjection: mat4 } {
+    const { view, projection } = this.buildViewAndProjection();
+    const inverseView = mat4.create();
+    mat4.invert(inverseView, view);
+    const inverseProjection = mat4.create();
+    mat4.invert(inverseProjection, projection);
+    return { inverseView, inverseProjection };
   }
 
   private handleMouseMove = (event: MouseEvent) => {
@@ -99,6 +148,66 @@ export class CameraModule {
     vec3.normalize(this.camera.right, this.camera.right);
   }
 
+  /** Returns the normalized WASD+Space/Shift input motion vector without applying it. */
+  getInputMotion(): vec3 {
+    const motion: vec3 = [0, 0, 0];
+    if (this.keysPressedState['KeyW']) {
+      const [x, _, z] = this.camera.direction;
+      vec3.add(motion, motion, [x, 0, z]);
+    }
+    if (this.keysPressedState['KeyS']) {
+      const [x, _, z] = this.camera.direction;
+      vec3.subtract(motion, motion, [x, 0, z]);
+    }
+    if (this.keysPressedState['KeyD']) {
+      const [x, _, z] = this.camera.right;
+      vec3.add(motion, motion, [x, 0, z]);
+    }
+    if (this.keysPressedState['KeyA']) {
+      const [x, _, z] = this.camera.right;
+      vec3.subtract(motion, motion, [x, 0, z]);
+    }
+    if (this.keysPressedState['Space']) {
+      vec3.add(motion, motion, this.camera.up);
+    }
+    if (this.keysPressedState['ShiftLeft']) {
+      vec3.subtract(motion, motion, this.camera.up);
+    }
+    if (vec3.length(motion) > 0) {
+      vec3.normalize(motion, motion);
+    }
+    return motion;
+  }
+
+  /** Returns true if the given key is currently pressed. */
+  isKeyPressed(code: string): boolean {
+    return !!this.keysPressedState[code];
+  }
+
+  /** Apply external look delta (e.g. from touch input). Adjusts yaw/pitch and updates direction. */
+  applyLookDelta(dx: number, dy: number): void {
+    this.camera.yaw -= dx;
+    this.camera.pitch -= dy;
+    if (this.camera.pitch > maxCameraPitch) this.camera.pitch = maxCameraPitch;
+    if (this.camera.pitch < -maxCameraPitch) this.camera.pitch = -maxCameraPitch;
+    this.updateCameraDirection();
+  }
+
+  /** Updates camera direction from mouse input. Call every frame. */
+  updateLook(): void {
+    if (!this.isFocused()) return;
+    this.updateCameraDirection();
+  }
+
+  /** Applies fly movement: input motion scaled by speed and dt. */
+  updateFlyMovement(dt: number): void {
+    if (!this.isFocused()) return;
+    const motion = this.getInputMotion();
+    if (vec3.length(motion) === 0) return;
+    vec3.scale(motion, motion, this.camera.speed * dt);
+    vec3.add(this.camera.position, this.camera.position, motion);
+  }
+
   getUserCmd(): UserCmd {
     const dir = this.camera.direction;
     return {
@@ -114,6 +223,12 @@ export class CameraModule {
 
   update() {
     if (!this.isFocused()) return;
+
     this.updateCameraDirection();
+    // Legacy: non-dt fly movement (kept for backward compat during transition)
+    const motion = this.getInputMotion();
+    if (vec3.length(motion) === 0) return;
+    vec3.scale(motion, motion, this.camera.speed);
+    vec3.add(this.camera.position, this.camera.position, motion);
   }
 }

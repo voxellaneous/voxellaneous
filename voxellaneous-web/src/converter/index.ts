@@ -4,7 +4,7 @@ import { voxelizeMeshes } from './voxelizer';
 import { mapColorsToPalette } from './palette-mapper';
 import { ConversionResult, VoxelizationConfig } from './types';
 import { VoxelObject, Scene } from '../scene';
-import { ByteArray } from '../../../voxellaneous-common/src/byte-array';
+import { ByteArray } from '../common/types';
 
 export type { VoxelizationConfig, ConversionResult } from './types';
 
@@ -43,6 +43,7 @@ export async function convertGLTFFromFolder(files: FileList, config: Voxelizatio
     modelMatrix,
     invModelMatrix,
     voxels,
+    palette: [],
   };
 
   return {
@@ -206,6 +207,7 @@ export async function importFromArrayBuffer(
     modelMatrix,
     invModelMatrix,
     voxels,
+    palette: [],
   };
 
   // Count non-zero voxels
@@ -230,7 +232,7 @@ export async function importFromArrayBuffer(
 /**
  * Compresses data using gzip
  */
-async function gzipCompress(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+async function gzipCompress(data: ByteArray): Promise<ByteArray> {
   const stream = new Blob([data]).stream();
   const compressedStream = stream.pipeThrough(new CompressionStream('gzip'));
   const reader = compressedStream.getReader();
@@ -243,7 +245,7 @@ async function gzipCompress(data: Uint8Array<ArrayBuffer>): Promise<Uint8Array<A
   }
 
   const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const result = new Uint8Array(totalLength);
+  const result = new ByteArray(totalLength);
   let offset = 0;
   for (const chunk of chunks) {
     result.set(chunk, offset);
@@ -273,7 +275,7 @@ async function gzipDecompress(data: ByteArray): Promise<ByteArray> {
   const decompressedStream = stream.pipeThrough(new DecompressionStream('gzip'));
   const reader = decompressedStream.getReader();
 
-  const chunks: ByteArray[] = [];
+  const chunks: Uint8Array[] = [];
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -281,7 +283,7 @@ async function gzipDecompress(data: ByteArray): Promise<ByteArray> {
   }
 
   const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const result = new Uint8Array(totalLength);
+  const result = new ByteArray(totalLength);
   let offset = 0;
   for (const chunk of chunks) {
     result.set(chunk, offset);

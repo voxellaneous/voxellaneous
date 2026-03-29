@@ -1,0 +1,103 @@
+import { HeightmapObject } from '../scene';
+
+/** Chunk coordinate in chunk-space (3D) */
+export interface ChunkCoord {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** Configuration for a single noise layer */
+export interface NoiseLayer {
+  /** Name for display in UI */
+  name: string;
+  /** Whether this layer is enabled */
+  enabled: boolean;
+  /** Base frequency for this layer */
+  frequency: number;
+  /** Amplitude (contribution strength) */
+  amplitude: number;
+  /** Number of octaves for fractal noise */
+  octaves: number;
+  /** Persistence (amplitude decay per octave) */
+  persistence: number;
+  /** Offset for seed variation between layers */
+  seedOffset: number;
+  /** If true, this layer is "detail" noise that flat biomes can suppress */
+  detail?: boolean;
+}
+
+/** Configuration for terrain generation */
+export interface TerrainConfig {
+  /** Voxels per chunk in all dimensions (cubic) */
+  chunkSize: number;
+  /** World units per chunk */
+  worldScale: number;
+  /** LOD levels: render distance per level */
+  lodLevels: number[];
+  /** Base seed for noise generation */
+  seed: number;
+  /** Noise layers for terrain generation */
+  noiseLayers: NoiseLayer[];
+  /** Base terrain height in world units (before noise) */
+  baseTerrainHeight: number;
+  /** Scale factor for noise contribution to height */
+  heightScale: number;
+}
+
+/** A loaded terrain chunk */
+export interface Chunk {
+  coord: ChunkCoord;
+  lod: number;
+  heightmapObject?: HeightmapObject;
+  lastAccessed: number;
+}
+
+/** Default noise layers */
+export const DEFAULT_NOISE_LAYERS: NoiseLayer[] = [
+  {
+    name: 'Continents',
+    enabled: true,
+    frequency: 0.00005,
+    amplitude: 1.0,
+    octaves: 2,
+    persistence: 0.4,
+    seedOffset: 0,
+  },
+  {
+    name: 'Hills',
+    enabled: true,
+    frequency: 0.0005,
+    amplitude: 1,
+    octaves: 2,
+    persistence: 0.35,
+    seedOffset: 1000,
+    detail: true,
+  },
+  {
+    name: 'Details',
+    enabled: true,
+    frequency: 0.01,
+    amplitude: 0.03,
+    octaves: 1,
+    persistence: 0.3,
+    seedOffset: 2000,
+    detail: true,
+  },
+];
+
+/** Default terrain configuration */
+export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
+  chunkSize: 32,
+  worldScale: 32,
+  lodLevels: [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+  seed: 761,
+  noiseLayers: DEFAULT_NOISE_LAYERS,
+  baseTerrainHeight: 0,
+  heightScale: 400,
+};
+
+/** Utility to create a chunk key for Map storage */
+export function chunkKey(coord: ChunkCoord): string {
+  return `${coord.x},${coord.y},${coord.z}`;
+}

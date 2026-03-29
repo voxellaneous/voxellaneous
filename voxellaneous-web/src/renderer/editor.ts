@@ -12,8 +12,16 @@ type GPUData = {
   backend: string;
 };
 
-export function initializeRendererTools(pane: Pane, app: AppData, profilerData: ProfilerData): void {
-  const settingsFolder = pane.addFolder({ title: 'Renderer Settings' });
+export function initializeRendererBackendInfo(pane: Pane, app: AppData): void {
+  const gpuData = app.renderer.get_gpu_info() as GPUData;
+  const backendFolder = pane.addFolder({ title: 'Renderer Backend' });
+  backendFolder.expanded = false;
+  backendFolder.addBinding(gpuData, 'driver', { label: 'Driver', readonly: true });
+  backendFolder.addBinding(gpuData, 'backend', { label: 'Backend', readonly: true });
+}
+
+export function initializeRendererTools(pane: Pane, app: AppData, profilerData: ProfilerData, collapsed = false): void {
+  const settingsFolder = pane.addFolder({ title: 'Renderer Settings', expanded: !collapsed });
   settingsFolder.addBinding(app, 'presentTarget', {
     label: 'Render Target',
     options: [
@@ -21,47 +29,90 @@ export function initializeRendererTools(pane: Pane, app: AppData, profilerData: 
       { text: 'Albedo', value: 0 },
       { text: 'Normal', value: 1 },
       { text: 'Linear-Z', value: 2 },
-      { text: 'Depth', value: 3 },
+      { text: 'Shadow', value: 3 },
     ],
   });
   settingsFolder.addBinding(app, 'showBboxes', {
     label: 'Show Bounding Boxes',
   });
 
-  const lightingFolder = pane.addFolder({ title: 'Lighting' });
-  lightingFolder.addBinding(app, 'lightDir', {
-    label: 'Light Direction',
-    x: { min: -1, max: 1, step: 0.01 },
-    y: { min: -1, max: 1, step: 0.01 },
-    z: { min: -1, max: 1, step: 0.01 },
+  const sunFolder = pane.addFolder({ title: 'Sun', expanded: !collapsed });
+  sunFolder.addBinding(app, 'sunTime', {
+    label: 'Time of Day',
+    min: 0,
+    max: 24,
+    step: 0.01,
   });
-  lightingFolder.addBinding(app, 'ambient', {
+  sunFolder.addBinding(app, 'sunTimeScale', {
+    label: 'Time Speed',
+    min: 0,
+    max: 100,
+    step: 0.1,
+  });
+  sunFolder.addBinding(app, 'sunAngle', {
+    label: 'Azimuth (°)',
+    min: 0,
+    max: 360,
+    step: 1,
+  });
+  sunFolder.addBinding(app, 'sunIlluminance', {
+    label: 'Illuminance',
+    min: 0.1,
+    max: 50,
+    step: 0.5,
+  });
+  sunFolder.addBinding(app, 'sunDiskScale', {
+    label: 'Disk Brightness',
+    min: 0,
+    max: 10,
+    step: 0.1,
+  });
+  sunFolder.addBinding(app, 'sunDiskSize', {
+    label: 'Disk Size (°)',
+    min: 0.1,
+    max: 5,
+    step: 0.05,
+  });
+
+  sunFolder.addBinding(app, 'sunOccSpeed', {
+    label: 'Occ. Speed',
+    min: 0.1,
+    max: 10.0,
+    step: 0.1,
+  });
+
+  sunFolder.addBinding(app, 'ambient', {
     label: 'Ambient',
     min: 0,
     max: 1,
     step: 0.01,
   });
-  lightingFolder.addBinding(app, 'lightIntensity', {
-    label: 'Light Intensity',
+
+  const hazeFolder = pane.addFolder({ title: 'Atmospheric Haze', expanded: !collapsed });
+  hazeFolder.addBinding(app, 'hazeDensity', {
+    label: 'Density',
     min: 0,
-    max: 3,
-    step: 0.1,
+    max: 0.0005,
+    step: 0.000005,
   });
 
-  const gpuData = app.renderer.get_gpu_info() as GPUData;
+  const fogFolder = pane.addFolder({ title: 'Ground Fog', expanded: !collapsed });
+  fogFolder.addBinding(app, 'fogDensity', {
+    label: 'Density',
+    min: 0,
+    max: 0.1,
+    step: 0.001,
+  });
+  fogFolder.addBinding(app, 'fogFalloff', {
+    label: 'Height Falloff',
+    min: 0.0,
+    max: 0.1,
+    step: 0.001,
+  });
 
-  const backendFolder = pane.addFolder({ title: 'Renderer Backend' });
-  backendFolder.expanded = false;
+  initializeRendererBackendInfo(pane, app);
 
-  backendFolder.addBinding(gpuData, 'name', { label: 'Name', readonly: true });
-  backendFolder.addBinding(gpuData, 'vendor', { label: 'Vendor', readonly: true, format: (v) => Math.floor(v) });
-  backendFolder.addBinding(gpuData, 'device', { label: 'Device', readonly: true, format: (v) => Math.floor(v) });
-  backendFolder.addBinding(gpuData, 'device_type', { label: 'Device Type', readonly: true });
-  backendFolder.addBinding(gpuData, 'driver', { label: 'Driver', readonly: true });
-  backendFolder.addBinding(gpuData, 'driver_info', { label: 'Driver Info', readonly: true });
-  backendFolder.addBinding(gpuData, 'backend', { label: 'Backend', readonly: true });
-
-  const performanceFolder = pane.addFolder({ title: 'Performance' });
+  const performanceFolder = pane.addFolder({ title: 'Performance', expanded: !collapsed });
   performanceFolder.addBinding(profilerData, 'fps', { label: 'FPS', readonly: true, format: (v) => v.toFixed(2) });
   performanceFolder.addBinding(profilerData, 'frameTime', {
     label: 'Frame Time (ms)',

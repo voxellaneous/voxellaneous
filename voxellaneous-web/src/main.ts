@@ -3,20 +3,31 @@ import { LocalPlayer } from './local-player';
 import './style.css';
 
 import { Renderer } from './renderer';
+import { isMobileDevice, MOBILE_QUALITY, DESKTOP_QUALITY } from './renderer/types';
 import { initializeDevTools } from './editor';
 import { importFromBinary, createSceneFromResult } from './converter';
-import { Scene, VoxelObject } from './scene';
+import { VoxelObject, RGBA } from './scene';
 import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
-import { ByteArray } from '../../voxellaneous-common/src/byte-array';
+import { ByteArray } from './common/types';
+import { ChunkManager, ShadowClipmapManager } from './terrain';
+import { CharacterController } from './character-controller';
+import { TouchInput } from './touch-input';
 
 const remoteMarkerSize = 4;
+const reusableMvp = new Float32Array(16);
+const reusableCamPos = new Float32Array(3);
+const reusableLightDir = new Float32Array(3);
+const markerPalette: RGBA[] = [
+  [0, 0, 0, 0], // Index 0: empty
+  [255, 0, 0, 255], // Index 1: red marker
+];
 
 function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
   const total = size * size * size;
-  const voxels = new ByteArray(new ArrayBuffer(total));
+  const voxels = new ByteArray(total);
   voxels.fill(paletteIndex);
   return voxels;
 }
@@ -37,6 +48,7 @@ function createRemoteMarkerObject(
     modelMatrix,
     invModelMatrix: inverseModelMatrix,
     voxels,
+    palette: markerPalette,
   };
 }
 
@@ -44,10 +56,24 @@ export type AppData = {
   renderer: Renderer;
   presentTarget: number;
   canvas: HTMLCanvasElement;
-  lightDir: { x: number; y: number; z: number };
+  sunTime: number;
+  sunAngle: number;
   ambient: number;
-  lightIntensity: number;
+  sunIlluminance: number;
+  sunDiskScale: number;
+  sunDiskSize: number;
   showBboxes: boolean;
+  terrainManager?: ChunkManager;
+  cameraModule?: CameraModule;
+  characterController?: CharacterController;
+  cameraSpeed: number;
+  hazeDensity: number;
+  fogDensity: number;
+  fogFalloff: number;
+  sunTimeScale: number;
+  sunOccSpeed: number;
+  sponzaPosition: { x: number; y: number; z: number };
+  repositionSponza?: () => void;
 };
 
 function createCanvasAutoresize({ renderer, canvas }: AppData): { autoresizeCanvas: VoidFunction } {
@@ -79,66 +105,122 @@ function registerRecurringAnimation(f: FrameRequestCallback): void {
   requestAnimationFrame(loop);
 }
 
-// function setupInputListeners() { ... } removed - using CameraModule directly
-
 async function initializeApp(): Promise<AppData> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 
-  // Use port 8080 for Geckos server (handled in NetworkClient default or passed explicitly)
   const network = new NetworkClient({ url: `http://${window.location.hostname}` });
 
-  const renderer = await Renderer.new(canvas);
+  const quality = isMobileDevice() ? MOBILE_QUALITY : DESKTOP_QUALITY;
+  const renderer = await Renderer.new(canvas, quality);
+  const cameraModule = new CameraModule(canvas);
+  cameraModule.setDirection(vec3.normalize(vec3.create(), [0, 0, 1]));
+
+  const player = new LocalPlayer([3770, 300, 620]);
+  cameraModule.setPosition(player.position as vec3);
+
   const app: AppData = {
     renderer,
     canvas,
     presentTarget: 4, // Default to Lit mode
-    lightDir: { x: 0.22, y: 0.22, z: 0.56 },
-    ambient: 0.3,
-    lightIntensity: 1.0,
+    sunTime: 8,
+    sunAngle: 260,
+    ambient: 0.15,
+    sunIlluminance: 10,
+    sunDiskScale: 0.8,
+    sunDiskSize: 2,
     showBboxes: false,
+    cameraModule,
+    cameraSpeed: cameraModule.speed,
+    hazeDensity: 0.0004,
+    fogDensity: 0,
+    fogFalloff: 0.01,
+    sunTimeScale: 0,
+    sunOccSpeed: 0.5,
+    sponzaPosition: quality === MOBILE_QUALITY ? { x: 3770, y: 500, z: 620 } : { x: 3770, y: 755, z: 620 },
   };
   const profilerData: ProfilerData = { fps: 0, frameTime: 0, pingMs: 0, lastTimeStamp: 0 };
-
-  const cameraModule = new CameraModule(canvas);
-  cameraModule.setDirection(vec3.normalize(vec3.create(), [0.5, 0, -1]));
-
-  const player = new LocalPlayer([-100, -470, -356]);
-  cameraModule.setPosition(player.position as vec3);
 
   const { autoresizeCanvas } = createCanvasAutoresize(app);
 
   // Load sponza scene
-  let baseScene: Scene = { palette: [], objects: [] };
+  let sponzaBaseObjects: VoxelObject[] = [];
   try {
-    const response = await fetch('/resources/sponza.voxgz');
+    const sponzaFile = quality === MOBILE_QUALITY ? 'sponza-small.voxgz' : 'sponza.voxgz';
+    const response = await fetch(`/resources/${sponzaFile}`);
     if (response.ok) {
       const blob = await response.blob();
       const file = new File([blob], 'sponza.voxgz');
       const result = await importFromBinary(file);
-      baseScene = createSceneFromResult(result);
+      const sponzaScene = createSceneFromResult(result);
+      sponzaBaseObjects = sponzaScene.objects.map((obj) => ({
+        ...obj,
+        palette: sponzaScene.palette,
+      }));
     }
   } catch (e) {
     console.warn('Failed to load sponza:', e);
   }
-  renderer.uploadScene(baseScene);
 
-  // Reserve index 254 for player markers (black color)
-  if (baseScene.palette.length <= 254) {
-    const missing = 255 - baseScene.palette.length;
-    for (let i = 0; i < missing; i++) {
-      baseScene.palette.push([0, 0, 0, 0]);
+  // Initialize terrain manager with LOD levels
+  const terrainManager = new ChunkManager({ lodLevels: quality.lodLevels }, quality.maxPendingChunkRequests);
+  app.terrainManager = terrainManager;
+
+  const shadowClipmap = new ShadowClipmapManager(terrainManager.getChunkCache(), terrainManager.getConfig());
+
+  const characterController = new CharacterController();
+  characterController.setFromEyePosition(cameraModule.position);
+  app.characterController = characterController;
+
+  const toggleFly = () => {
+    characterController.toggleFlyWalk();
+    if (!characterController.isFlying) {
+      characterController.setFromEyePosition(cameraModule.position);
     }
+    touchInput?.setFlyActive(characterController.isFlying);
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyF' && !e.repeat) {
+      toggleFly();
+    }
+  });
+
+  // Touch input for mobile
+  const isMobile = window.matchMedia('(pointer: coarse)').matches;
+  const touchInput = isMobile ? new TouchInput(canvas, toggleFly) : null;
+
+  function offsetSponza(base: VoxelObject[], pos: { x: number; y: number; z: number }): VoxelObject[] {
+    return base.map((obj) => {
+      const m = mat4.clone(obj.modelMatrix);
+      m[12] += pos.x;
+      m[13] += pos.y;
+      m[14] += pos.z;
+      return { ...obj, modelMatrix: m, invModelMatrix: mat4.invert(mat4.create(), m)! };
+    });
   }
-  baseScene.palette[254] = [0, 0, 0, 255];
 
-  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 254);
+  // Upload sponza with initial position
+  renderer.uploadStaticObjects(offsetSponza(sponzaBaseObjects, app.sponzaPosition), []);
+  app.repositionSponza = () => {
+    renderer.uploadStaticObjects(offsetSponza(sponzaBaseObjects, app.sponzaPosition), []);
+  };
 
-  // Tracking known players to avoid re-uploading scene
+  // Initial terrain load (dynamic)
+  terrainManager.update(cameraModule.position);
+  renderer.uploadScene({
+    palette: [],
+    objects: [],
+    heightmapObjects: terrainManager.getVisibleHeightmapChunks(),
+  });
+
+  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 1);
+
+  // Tracking known remote players to avoid unnecessary scene re-uploads
   const knownRemotePlayers = new Set<string>();
 
   const updateRemoteScene = () => {
     const remoteEntities = network.getRemoteEntities();
-    const currentIds = new Set(remoteEntities.map(e => `remote_${e.id}`));
+    const currentIds = new Set(remoteEntities.map((e) => `remote_${e.id}`));
 
     let structureChanged = false;
     for (const id of currentIds) {
@@ -152,49 +234,49 @@ async function initializeApp(): Promise<AppData> {
     }
 
     if (structureChanged) {
-      console.log('Structure changed, re-uploading scene');
       knownRemotePlayers.clear();
-      currentIds.forEach(id => knownRemotePlayers.add(id));
-
-      const remoteObjects = remoteEntities.map((entity) =>
-        createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
-      );
-
-      const scene: Scene = {
-        palette: baseScene.palette,
-        objects: [...baseScene.objects, ...remoteObjects],
-      };
-      renderer.uploadScene(scene);
-    } else {
-      for (const entity of remoteEntities) {
-        const id = `remote_${entity.id}`;
-        const obj = createRemoteMarkerObject(entity.id, entity.position, markerVoxels);
-
-        const uniformData = new Float32Array(32);
-        uniformData.set(obj.modelMatrix, 0);
-        uniformData.set(obj.invModelMatrix, 16);
-
-        renderer.updateObjectTransform(id, uniformData);
-      }
+      currentIds.forEach((id) => knownRemotePlayers.add(id));
     }
+
+    const remoteObjects = remoteEntities.map((entity) =>
+      createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
+    );
+    const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
+    renderer.uploadScene({
+      palette: [],
+      objects: remoteObjects,
+      heightmapObjects: heightmapChunks,
+    });
   };
 
-  const remoteSceneInterval = window.setInterval(updateRemoteScene, 20);
+  const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
   window.addEventListener('beforeunload', () => {
     window.clearInterval(remoteSceneInterval);
   });
 
   let lastReconciledSeq: number | null = null;
 
-  // RENDER LOOP
+  // NOW start render loop after scene is uploaded
+  let lastFrameTime = 0;
   const render: FrameRequestCallback = (time) => {
+    const dt = lastFrameTime === 0 ? 1 / 60 : Math.min((time - lastFrameTime) / 1000, 0.1);
+    lastFrameTime = time;
+
     autoresizeCanvas();
     updateProfilerData(profilerData, time);
     profilerData.pingMs = network.getPingMs();
 
-    const dt = profilerData.frameTime / 1000;
-    cameraModule.update();
+    cameraModule.updateLook();
 
+    // Apply touch look
+    if (touchInput) {
+      const { dx, dy } = touchInput.consumeLookDelta();
+      if (dx !== 0 || dy !== 0) {
+        cameraModule.applyLookDelta(dx, dy);
+      }
+    }
+
+    // Send input to server and apply locally via LocalPlayer
     if (cameraModule.isFocused()) {
       const cmd = cameraModule.getUserCmd();
       player.applyUserCmd(cmd, dt);
@@ -211,10 +293,10 @@ async function initializeApp(): Promise<AppData> {
       const { x: sx, y: sy, z: sz } = serverState.position;
       const [px, py, pz] = player.position;
 
-      const dx = sx - px;
-      const dy = sy - py;
-      const dz = sz - pz;
-      const distSq = dx * dx + dy * dy + dz * dz;
+      const ddx = sx - px;
+      const ddy = sy - py;
+      const ddz = sz - pz;
+      const distSq = ddx * ddx + ddy * ddy + ddz * ddz;
 
       const SNAP_THRESHOLD = 5.0;
       const CORRECTION_THRESHOLD = 0.5;
@@ -237,16 +319,64 @@ async function initializeApp(): Promise<AppData> {
       cameraModule.setPosition(player.position as vec3);
     }
 
+    // Update terrain chunks based on camera position
+    const terrainChanged = app.terrainManager!.update(cameraModule.position);
+    if (terrainChanged) {
+      const remoteEntities = network.getRemoteEntities();
+      const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
+      const remoteObjects = remoteEntities.map((entity) =>
+        createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
+      );
+      renderer.uploadScene({
+        palette: [],
+        objects: remoteObjects,
+        heightmapObjects: heightmapChunks,
+      });
+    }
+
+    // Update shadow clipmap from terrain cache and upload dirty levels
+    if (shadowClipmap.update(cameraModule.position[0], cameraModule.position[2], terrainManager.cacheGeneration)) {
+      renderer.uploadShadowClipmap(shadowClipmap);
+    }
+
     const mvpMatrix = cameraModule.calculateMVP();
-    const lightDirArray = new Float32Array([app.lightDir.x, app.lightDir.y, app.lightDir.z]);
+    const { inverseView, inverseProjection } = cameraModule.getCameraMatrices();
+    reusableMvp.set(mvpMatrix);
+    reusableCamPos.set(cameraModule.position);
+
+    // Advance time of day
+    if (app.sunTimeScale > 0) {
+      app.sunTime = (app.sunTime + dt * app.sunTimeScale) % 24;
+    }
+
+    // Sun traces a great circle tilted 75° from the horizon
+    const tilt = (75 * Math.PI) / 180;
+    const phase = ((app.sunTime - 6) / 24) * 2 * Math.PI;
+    const sx = Math.cos(phase);
+    const sy = Math.sin(phase) * Math.sin(tilt);
+    const sz = -Math.sin(phase) * Math.cos(tilt);
+    const azimRad = (app.sunAngle * Math.PI) / 180;
+    reusableLightDir[0] = sx * Math.cos(azimRad) + sz * Math.sin(azimRad);
+    reusableLightDir[1] = sy;
+    reusableLightDir[2] = -sx * Math.sin(azimRad) + sz * Math.cos(azimRad);
+
     renderer.render(
-      new Float32Array(mvpMatrix),
-      new Float32Array(cameraModule.position),
+      reusableMvp,
+      reusableCamPos,
       app.presentTarget,
-      lightDirArray,
+      reusableLightDir,
       app.ambient,
-      app.lightIntensity,
       app.showBboxes,
+      new Float32Array(inverseView),
+      new Float32Array(inverseProjection),
+      app.sunIlluminance,
+      app.sunDiskScale,
+      app.sunDiskSize,
+      app.hazeDensity,
+      app.fogDensity,
+      app.fogFalloff,
+      dt,
+      app.sunOccSpeed,
     );
   };
   registerRecurringAnimation(render);

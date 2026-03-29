@@ -7,3 +7,10 @@ tmp/
 # Rust build artifacts
 **/target/
 Cargo.lock
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example

@@ -36,7 +36,7 @@ function addObjectToScene(scene: Scene, id: string, dims: vec3, translate: vec3,
   const modelMatrix = mat4.create();
   mat4.translate(modelMatrix, modelMatrix, translate);
   mat4.scale(modelMatrix, modelMatrix, dims);
-  const invModelMatrix = mat4.invert(mat4.create(), modelMatrix);
+  const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
 
   scene.objects.push({
     id,
@@ -44,6 +44,7 @@ function addObjectToScene(scene: Scene, id: string, dims: vec3, translate: vec3,
     modelMatrix,
     invModelMatrix,
     voxels,
+    palette: [],
   });
 }
 

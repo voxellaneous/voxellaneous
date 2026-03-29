@@ -1,6 +1,6 @@
 import { VoxelData } from './types';
 import { RGBA } from '../scene';
-import { ByteArray } from '../../../voxellaneous-common/src/byte-array';
+import { ByteArray } from '../common/types';
 
 const MAX_PALETTE_SIZE = 256;
 
