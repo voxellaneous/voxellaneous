@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "cd ../voxellaneous-common && npm install",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
