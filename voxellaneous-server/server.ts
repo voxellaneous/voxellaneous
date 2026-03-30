@@ -101,6 +101,12 @@ class GameServer {
       player.position.x = x;
       player.position.y = y;
       player.position.z = z;
+      if (typeof data.yaw === 'number' && Number.isFinite(data.yaw)) {
+        player.rotation.x = 0;
+        player.rotation.y = Math.sin(data.yaw / 2);
+        player.rotation.z = 0;
+        player.rotation.w = Math.cos(data.yaw / 2);
+      }
       player.lastInputTime = Date.now();
     });
   }
