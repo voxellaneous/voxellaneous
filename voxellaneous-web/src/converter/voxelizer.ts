@@ -34,7 +34,8 @@ export function voxelizeMeshes(
     fillInterior(voxelColors, dims);
   }
 
-  return { dims, voxelColors };
+  // Trim grid to tight bounding box of occupied voxels
+  return trimToOccupied(dims, voxelColors);
 }
 
 /**
@@ -262,6 +263,53 @@ function fillInterior(voxelColors: Map<number, RGBA>, dims: [number, number, num
       }
     }
   }
+}
+
+/**
+ * Trims the voxel grid to the tight bounding box of occupied voxels,
+ * remapping indices into the smaller grid.
+ */
+function trimToOccupied(
+  dims: [number, number, number],
+  voxelColors: Map<number, RGBA>
+): VoxelData {
+  if (voxelColors.size === 0) {
+    return { dims: [0, 0, 0], voxelColors };
+  }
+
+  const [nx, ny, _nz] = dims;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+  for (const idx of voxelColors.keys()) {
+    const x = idx % nx;
+    const y = Math.floor(idx / nx) % ny;
+    const z = Math.floor(idx / (nx * ny));
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    minZ = Math.min(minZ, z);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+    maxZ = Math.max(maxZ, z);
+  }
+
+  const newDims: [number, number, number] = [
+    maxX - minX + 1,
+    maxY - minY + 1,
+    maxZ - minZ + 1,
+  ];
+
+  // Remap voxels into the trimmed grid
+  const newColors = new Map<number, RGBA>();
+  const [nnx, nny] = newDims;
+  for (const [idx, color] of voxelColors) {
+    const x = idx % nx - minX;
+    const y = Math.floor(idx / nx) % ny - minY;
+    const z = Math.floor(idx / (nx * ny)) - minZ;
+    newColors.set(x + nnx * (y + nny * z), color);
+  }
+
+  return { dims: newDims, voxelColors: newColors };
 }
 
 // Vector math helpers

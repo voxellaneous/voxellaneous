@@ -29,10 +29,10 @@ export async function convertGLTFFromFolder(files: FileList, config: Voxelizatio
   const endTime = performance.now();
 
   // Create VoxelObject with proper scale to be visible
-  const dims: vec3 = [config.resolution, config.resolution, config.resolution];
+  const dims: vec3 = voxelData.dims;
   const modelMatrix = mat4.create();
-  // Scale to match resolution so each voxel is 1 unit
-  mat4.scale(modelMatrix, modelMatrix, [config.resolution, config.resolution, config.resolution]);
+  // Scale per-axis so each voxel is 1 cubic world unit
+  mat4.scale(modelMatrix, modelMatrix, dims);
   // Center the object
   mat4.translate(modelMatrix, modelMatrix, [-0.5, -0.5, -0.5]);
   const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
@@ -195,9 +195,9 @@ export async function importFromArrayBuffer(
 
   // Create object with proper transforms
   const dims: [number, number, number] = [dimX, dimY, dimZ];
-  const resolution = Math.max(dimX, dimY, dimZ);
   const modelMatrix = mat4.create();
-  mat4.scale(modelMatrix, modelMatrix, [resolution, resolution, resolution]);
+  // Scale per-axis so each voxel is 1 cubic world unit
+  mat4.scale(modelMatrix, modelMatrix, [dimX, dimY, dimZ]);
   mat4.translate(modelMatrix, modelMatrix, [-0.5, -0.5, -0.5]);
   const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
 

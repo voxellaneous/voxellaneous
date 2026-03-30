@@ -25,6 +25,10 @@ import quadDepthWgsl from './shaders/quad_depth.wgsl?raw';
 import sunOcclusionWgsl from './shaders/sun_occlusion.wgsl?raw';
 import lensFlareWgsl from './shaders/lens_flare.wgsl?raw';
 import lensFlareDownsampleWgsl from './shaders/lens_flare_downsample.wgsl?raw';
+import envCubemapWgsl from './shaders/env_cubemap.wgsl?raw';
+import envSHReduceWgsl from './shaders/env_sh_reduce.wgsl?raw';
+
+const ENV_CUBEMAP_SIZE = 64;
 
 interface AdapterInfo {
   vendor: string;
@@ -138,6 +142,22 @@ export class Renderer {
   private lensFlareData = new ArrayBuffer(16);
   private lensFlareView = new DataView(this.lensFlareData);
   private linearSampler!: GPUSampler;
+
+  // Environment cubemap
+  private envCubemapStorageView!: GPUTextureView;
+  private envCubemapSampleView!: GPUTextureView;
+  private envCubemapPipeline!: GPUComputePipeline;
+  private envCubemapLayout!: GPUBindGroupLayout;
+  private envCubemapUniformBuffer!: GPUBuffer;
+  private envCubemapLastSunDir = new Float32Array(3);
+  private envCubemapDirty = true;
+  private envCubemapParamsData = new ArrayBuffer(32);
+  private envCubemapParamsView = new DataView(this.envCubemapParamsData);
+
+  // SH irradiance from cubemap
+  private envSHBuffer!: GPUBuffer;
+  private envSHPipeline!: GPUComputePipeline;
+  private envSHLayout!: GPUBindGroupLayout;
 
   private constructor(
     device: GPUDevice,
@@ -466,6 +486,21 @@ export class Renderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: 'read-only-storage' },
         },
+        // Environment cubemap (from atmosphere)
+        {
+          binding: 10,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: {
+            sampleType: 'float',
+            viewDimension: 'cube',
+          },
+        },
+        // SH irradiance coefficients
+        {
+          binding: 11,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: 'read-only-storage' },
+        },
       ],
     });
 
@@ -773,6 +808,60 @@ export class Renderer {
         },
       },
     });
+
+    // Environment cubemap from atmosphere (64x64x6 faces, recomputed when sun moves)
+    const envCubemapTexture = device.createTexture({
+      label: 'Environment Cubemap',
+      size: { width: ENV_CUBEMAP_SIZE, height: ENV_CUBEMAP_SIZE, depthOrArrayLayers: 6 },
+      dimension: '2d',
+      format: hdrFormat,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    renderer.envCubemapStorageView = envCubemapTexture.createView({ dimension: '2d-array' });
+    renderer.envCubemapSampleView = envCubemapTexture.createView({ dimension: 'cube' });
+
+    const envCubemapLayout = device.createBindGroupLayout({
+      label: 'Env Cubemap Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: hdrFormat, viewDimension: '2d-array' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      ],
+    });
+    const envCubemapShader = device.createShaderModule({ label: 'Env Cubemap Shader', code: envCubemapWgsl });
+    renderer.envCubemapPipeline = device.createComputePipeline({
+      label: 'Env Cubemap Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [envCubemapLayout] }),
+      compute: { module: envCubemapShader, entryPoint: 'main' },
+    });
+    renderer.envCubemapLayout = envCubemapLayout;
+    renderer.envCubemapUniformBuffer = device.createBuffer({
+      label: 'Env Cubemap Uniform',
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // SH irradiance reduction: cubemap → 9 L2 SH coefficients
+    renderer.envSHBuffer = device.createBuffer({
+      label: 'Env SH Coefficients',
+      size: 144, // 9 * vec4<f32>
+      usage: GPUBufferUsage.STORAGE,
+    });
+    const envSHLayout = device.createBindGroupLayout({
+      label: 'Env SH Layout',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      ],
+    });
+    const envSHShader = device.createShaderModule({ label: 'Env SH Reduce Shader', code: envSHReduceWgsl });
+    renderer.envSHPipeline = device.createComputePipeline({
+      label: 'Env SH Reduce Pipeline',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [envSHLayout] }),
+      compute: { module: envSHShader, entryPoint: 'main' },
+    });
+    renderer.envSHLayout = envSHLayout;
 
     // HDR intermediate texture
     const { texture: hdrTexture, view: hdrView } = createRenderTexture(
@@ -1172,6 +1261,57 @@ export class Renderer {
       computePass.end();
     }
 
+    // 2.5) Environment cubemap update (only when sun moves significantly)
+    if (presentTarget === 4) {
+      const sunDirChanged =
+        Math.abs(lightDir[0] - this.envCubemapLastSunDir[0]) > 0.01 ||
+        Math.abs(lightDir[1] - this.envCubemapLastSunDir[1]) > 0.01 ||
+        Math.abs(lightDir[2] - this.envCubemapLastSunDir[2]) > 0.01;
+
+      if (this.envCubemapDirty || sunDirChanged) {
+        this.envCubemapParamsView.setFloat32(0, lightDir[0], true);
+        this.envCubemapParamsView.setFloat32(4, lightDir[1], true);
+        this.envCubemapParamsView.setFloat32(8, lightDir[2], true);
+        this.envCubemapParamsView.setFloat32(12, sunIlluminance, true);
+        this.envCubemapParamsView.setFloat32(16, Math.max(viewPosition[1] / 2000 + 6360, 6360.01), true);
+        this.queue.writeBuffer(this.envCubemapUniformBuffer, 0, this.envCubemapParamsData);
+
+        const pass = encoder.beginComputePass({ label: 'Env Cubemap Pass' });
+        const bg = this.device.createBindGroup({
+          label: 'Env Cubemap BG',
+          layout: this.envCubemapLayout,
+          entries: [
+            { binding: 0, resource: this.skyRenderer.resources.transmittanceLut.view },
+            { binding: 1, resource: this.skyRenderer.resources.lutSampler },
+            { binding: 2, resource: this.envCubemapStorageView },
+            { binding: 3, resource: { buffer: this.envCubemapUniformBuffer } },
+          ],
+        });
+        pass.setPipeline(this.envCubemapPipeline);
+        pass.setBindGroup(0, bg);
+        pass.dispatchWorkgroups(ENV_CUBEMAP_SIZE / 8, ENV_CUBEMAP_SIZE / 8, 6);
+        pass.end();
+
+        // SH reduction: cubemap → 9 L2 coefficients
+        const shPass = encoder.beginComputePass({ label: 'Env SH Reduce Pass' });
+        const shBg = this.device.createBindGroup({
+          label: 'Env SH BG',
+          layout: this.envSHLayout,
+          entries: [
+            { binding: 0, resource: this.envCubemapStorageView },
+            { binding: 1, resource: { buffer: this.envSHBuffer } },
+          ],
+        });
+        shPass.setPipeline(this.envSHPipeline);
+        shPass.setBindGroup(0, shBg);
+        shPass.dispatchWorkgroups(1);
+        shPass.end();
+
+        this.envCubemapLastSunDir.set(lightDir);
+        this.envCubemapDirty = false;
+      }
+    }
+
     // 3) Present Pass
     const frameTexture = this.context.getCurrentTexture();
     const frameView = frameTexture.createView();
@@ -1288,6 +1428,8 @@ export class Renderer {
             { binding: 7, resource: this.skyRenderer.resources.transmittanceLut.view },
             { binding: 8, resource: this.skyRenderer.resources.lutSampler },
             { binding: 9, resource: { buffer: this.sunOcclusionBuffer } },
+            { binding: 10, resource: this.envCubemapSampleView },
+            { binding: 11, resource: { buffer: this.envSHBuffer } },
           ],
         });
         pass.setPipeline(this.lightingPipeline);

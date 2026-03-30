@@ -4,50 +4,84 @@ import './style.css';
 import { Renderer } from './renderer';
 import { isMobileDevice, MOBILE_QUALITY, DESKTOP_QUALITY } from './renderer/types';
 import { initializeDevTools } from './editor';
-import { importFromBinary, createSceneFromResult } from './converter';
+import { importFromBinary, createSceneFromResult, ConversionResult } from './converter';
 import { VoxelObject, RGBA } from './scene';
 import { ProfilerData, updateProfilerData } from './profiler-data';
 import { vec3 } from 'gl-matrix';
 import { NetworkClient } from './network';
 import { mat4 } from 'gl-matrix';
-import { ByteArray } from './common/types';
 import { ChunkManager, ShadowClipmapManager } from './terrain';
 import { CharacterController } from './character-controller';
 import { TouchInput } from './touch-input';
 
-const remoteMarkerSize = 4;
 const reusableMvp = new Float32Array(16);
 const reusableCamPos = new Float32Array(3);
 const reusableLightDir = new Float32Array(3);
-const markerPalette: RGBA[] = [
-  [0, 0, 0, 0], // Index 0: empty
-  [255, 0, 0, 255], // Index 1: red marker
-];
 
-function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
-  const total = size * size * size;
-  const voxels = new ByteArray(total);
-  voxels.fill(paletteIndex);
-  return voxels;
+function playerColorFromId(id: number): RGBA {
+  // Golden ratio spread for well-distributed hues
+  const hue = (id * 137.508) % 360;
+  const s = 0.7,
+    l = 0.55;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0,
+    g = 0,
+    b = 0;
+  if (hue < 60) {
+    r = c;
+    g = x;
+  } else if (hue < 120) {
+    r = x;
+    g = c;
+  } else if (hue < 180) {
+    g = c;
+    b = x;
+  } else if (hue < 240) {
+    g = x;
+    b = c;
+  } else if (hue < 300) {
+    r = x;
+    b = c;
+  } else {
+    r = c;
+    b = x;
+  }
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255), 255];
 }
 
-function createRemoteMarkerObject(
+function tintPalette(palette: RGBA[], tint: RGBA): RGBA[] {
+  return palette.map((c) => {
+    if (c[3] === 0) return c;
+    // Luminance of original color to preserve shading
+    const lum = (c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114) / 255;
+    return [Math.round(tint[0] * lum), Math.round(tint[1] * lum), Math.round(tint[2] * lum), c[3]];
+  });
+}
+
+function createRemotePlayerObject(
   id: number,
   position: { x: number; y: number; z: number },
-  voxels: ByteArray,
+  rotation: { y: number; w: number },
+  playerModel: VoxelObject,
+  playerHeight: number,
 ): VoxelObject {
+  const [nx, ny, nz] = playerModel.dims;
+  const yaw = 2 * Math.atan2(rotation.y, rotation.w);
   const modelMatrix = mat4.create();
-  mat4.translate(modelMatrix, modelMatrix, [position.x, position.y, position.z]);
-  mat4.scale(modelMatrix, modelMatrix, [remoteMarkerSize, remoteMarkerSize, remoteMarkerSize]);
-  const inverseModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
+  mat4.translate(modelMatrix, modelMatrix, [position.x, position.y - playerHeight, position.z]);
+  mat4.rotateY(modelMatrix, modelMatrix, yaw - Math.PI / 2);
+  mat4.scale(modelMatrix, modelMatrix, [nx, ny, nz]);
+  mat4.translate(modelMatrix, modelMatrix, [0, 0.5, 0]);
+  const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
 
   return {
+    ...playerModel,
     id: `remote_${id}`,
-    dims: vec3.fromValues(remoteMarkerSize, remoteMarkerSize, remoteMarkerSize),
     modelMatrix,
-    invModelMatrix: inverseModelMatrix,
-    voxels,
-    palette: markerPalette,
+    invModelMatrix,
+    palette: tintPalette(playerModel.palette, playerColorFromId(id)),
   };
 }
 
@@ -73,6 +107,7 @@ export type AppData = {
   sunOccSpeed: number;
   sponzaPosition: { x: number; y: number; z: number };
   repositionSponza?: () => void;
+  addConvertedObject?: (result: ConversionResult) => void;
 };
 
 function createCanvasAutoresize({ renderer, canvas }: AppData): { autoresizeCanvas: VoidFunction } {
@@ -162,6 +197,19 @@ async function initializeApp(): Promise<AppData> {
     console.warn('Failed to load sponza:', e);
   }
 
+  // Load player model for remote player rendering
+  let playerModel: VoxelObject | null = null;
+  try {
+    const response = await fetch('/resources/player.voxgz');
+    if (response.ok) {
+      const compressed = new (await import('./common/types')).ByteArray(await response.arrayBuffer());
+      const result = await (await import('./converter')).importFromArrayBuffer(compressed, 'player.voxgz');
+      playerModel = { ...result.object, palette: result.palette };
+    }
+  } catch (e) {
+    console.warn('Failed to load player model:', e);
+  }
+
   // Initialize terrain manager with LOD levels
   const terrainManager = new ChunkManager({ lodLevels: quality.lodLevels }, quality.maxPendingChunkRequests);
   app.terrainManager = terrainManager;
@@ -201,9 +249,73 @@ async function initializeApp(): Promise<AppData> {
   }
 
   // Upload sponza with initial position
-  renderer.uploadStaticObjects(offsetSponza(sponzaBaseObjects, app.sponzaPosition), []);
-  app.repositionSponza = () => {
-    renderer.uploadStaticObjects(offsetSponza(sponzaBaseObjects, app.sponzaPosition), []);
+  const convertedObjects: VoxelObject[] = [];
+
+  function reuploadStaticObjects() {
+    renderer.uploadStaticObjects([...offsetSponza(sponzaBaseObjects, app.sponzaPosition), ...convertedObjects], []);
+  }
+
+  reuploadStaticObjects();
+  app.repositionSponza = reuploadStaticObjects;
+
+  app.addConvertedObject = (result: ConversionResult) => {
+    const obj = result.object;
+    const [nx, ny, nz] = obj.dims;
+
+    // Find the lowest occupied Y layer in the voxel data
+    let minOccupiedY = ny;
+    for (let y = 0; y < ny && minOccupiedY === ny; y++) {
+      for (let z = 0; z < nz; z++) {
+        for (let x = 0; x < nx; x++) {
+          if (obj.voxels[x + y * nx + z * nx * ny] !== 0) {
+            minOccupiedY = y;
+            break;
+          }
+        }
+        if (minOccupiedY !== ny) break;
+      }
+    }
+
+    // Place ahead of the player in the facing direction (projected onto XZ plane)
+    const [dx, , dz] = cameraModule.direction;
+    const len = Math.sqrt(dx * dx + dz * dz) || 1;
+    const footprint = Math.max(nx, nz);
+    const spawnDist = footprint * 1.5;
+    const spawnX = cameraModule.position[0] + (dx / len) * spawnDist;
+    const spawnZ = cameraModule.position[2] + (dz / len) * spawnDist;
+
+    // Sample terrain height at footprint corners and center, use the max so model never clips into slopes
+    const halfFootprint = footprint / 2;
+    let groundY = cameraModule.position[1];
+    for (const [ox, oz] of [
+      [0, 0],
+      [-halfFootprint, -halfFootprint],
+      [halfFootprint, -halfFootprint],
+      [-halfFootprint, halfFootprint],
+      [halfFootprint, halfFootprint],
+    ]) {
+      const h = terrainManager.queryHeight(spawnX + ox, spawnZ + oz);
+      if (h !== null && h > groundY) groundY = h;
+    }
+
+    // Place so the lowest occupied voxel layer sits at ground level
+    // Scale per-axis so each voxel is 1 cubic world unit
+    const modelMatrix = mat4.create();
+    mat4.translate(modelMatrix, modelMatrix, [spawnX, groundY, spawnZ]);
+    mat4.scale(modelMatrix, modelMatrix, [nx, ny, nz]);
+    mat4.translate(modelMatrix, modelMatrix, [-0.5, -minOccupiedY / ny, -0.5]);
+    const invModelMatrix = mat4.invert(mat4.create(), modelMatrix)!;
+
+    const positioned: VoxelObject = {
+      ...obj,
+      id: `converted_${obj.id}_${Date.now()}`,
+      modelMatrix,
+      invModelMatrix,
+      palette: result.palette,
+    };
+
+    convertedObjects.push(positioned);
+    reuploadStaticObjects();
   };
 
   // Initial terrain load (dynamic)
@@ -213,8 +325,6 @@ async function initializeApp(): Promise<AppData> {
     objects: [],
     heightmapObjects: terrainManager.getVisibleHeightmapChunks(),
   });
-
-  const markerVoxels = createUniformVoxelData(remoteMarkerSize, 1);
 
   // NOW start render loop after scene is uploaded
   let lastFrameTime = 0;
@@ -265,15 +375,19 @@ async function initializeApp(): Promise<AppData> {
       cameraModule.setPosition(eyePos);
     }
 
-    // Send position to server
+    // Send position + yaw to server
     const [cx, cy, cz] = cameraModule.position;
-    network.sendPosition(cx, cy, cz);
+    const [dx, , dz] = cameraModule.direction;
+    network.sendPosition(cx, cy, cz, Math.atan2(dx, dz));
 
     // Update remote players + terrain every frame for smooth interpolation
     const remoteEntities = network.getRemoteEntities();
-    const remoteObjects = remoteEntities.map((entity) =>
-      createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
-    );
+    const { playerHeight } = characterController.config;
+    const remoteObjects = playerModel
+      ? remoteEntities.map((entity) =>
+          createRemotePlayerObject(entity.id, entity.position, entity.rotation, playerModel, playerHeight),
+        )
+      : [];
     const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
     app.terrainManager!.update(cameraModule.position);
     renderer.uploadScene({

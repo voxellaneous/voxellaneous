@@ -14,10 +14,16 @@ struct LightingUniforms {
     fog_falloff:        f32,
 };
 
+const PI: f32 = 3.14159265359;
+
 // Earth atmosphere constants (km) matching webgpu-sky-atmosphere
 const BOTTOM_RADIUS: f32 = 6360.0;
 const TOP_RADIUS: f32 = 6460.0;
 const TO_KM_SCALE: f32 = 1.0 / 2000.0;
+
+// Fixed PBR material properties (will be per-material later)
+const PBR_METALLIC: f32 = 0.0;
+const PBR_ROUGHNESS: f32 = 0.5;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
@@ -42,6 +48,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
 @group(0) @binding(7) var transmittance_lut: texture_2d<f32>;
 @group(0) @binding(8) var lut_sampler: sampler;
 @group(0) @binding(9) var<storage, read> sun_occlusion: array<f32, 1>;
+@group(0) @binding(10) var env_cubemap: texture_cube<f32>;
+@group(0) @binding(11) var<storage, read> sh_coeffs: array<vec4<f32>, 9>;
 
 // Matches webgpu-sky-atmosphere transmittance_lut_params_to_uv
 fn transmittance_lut_uv(view_height: f32, cos_view_zenith: f32) -> vec2<f32> {
@@ -77,6 +85,47 @@ fn height_fog(cam_y: f32, ray_y: f32, dist: f32, density: f32, falloff: f32) -> 
     return clamp(1.0 - exp(-max(amount, 0.0)), 0.0, 1.0);
 }
 
+// --- PBR helpers ---
+
+fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    return f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+fn geometry_schlick_ggx(n_dot_x: f32, roughness: f32) -> f32 {
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0;
+    return n_dot_x / (n_dot_x * (1.0 - k) + k);
+}
+
+fn geometry_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+    return geometry_schlick_ggx(n_dot_v, roughness) * geometry_schlick_ggx(n_dot_l, roughness);
+}
+
+// L2 SH irradiance evaluation (cosine convolution baked into coefficients)
+fn eval_sh_irradiance(n: vec3<f32>) -> vec3<f32> {
+    var result = sh_coeffs[0].xyz * 0.282095;
+    result += sh_coeffs[1].xyz * (0.488603 * n.y);
+    result += sh_coeffs[2].xyz * (0.488603 * n.z);
+    result += sh_coeffs[3].xyz * (0.488603 * n.x);
+    result += sh_coeffs[4].xyz * (1.092548 * n.x * n.y);
+    result += sh_coeffs[5].xyz * (1.092548 * n.y * n.z);
+    result += sh_coeffs[6].xyz * (0.315392 * (3.0 * n.z * n.z - 1.0));
+    result += sh_coeffs[7].xyz * (1.092548 * n.x * n.z);
+    result += sh_coeffs[8].xyz * (0.546274 * (n.x * n.x - n.y * n.y));
+    return max(result, vec3<f32>(0.0));
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let dims = textureDimensions(albedo_tex, 0);
@@ -110,13 +159,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     );
     let shadow = textureLoad(shadow_tex, shadow_coord, 0).r;
 
-    // N dot L shading with sun color; no direct light when sun is below horizon
-    let sun_above = smoothstep(-0.05, 0.05, light_dir.y);
-    let ndotl = max(dot(normal, light_dir), 0.0);
-    let diffuse = ndotl * sun_color * (u_lighting.light_intensity * 0.1) * (1.0 - shadow) * sun_above;
-    let lighting = vec3<f32>(u_lighting.ambient) + diffuse;
-    let lit_color = albedo.rgb * lighting;
-
     // Reconstruct world position from hardware depth
     let depth = textureLoad(depth_tex, coord, 0);
     let ndc = vec4<f32>(in.uv * 2.0 - 1.0, depth, 1.0);
@@ -124,6 +166,55 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let world_pos = world_h.xyz / world_h.w;
 
     let cam = u_lighting.cam_pos_ws;
+    let view_dir = normalize(cam - world_pos);
+    let n_dot_v = max(dot(normal, view_dir), 0.001);
+    let n_dot_l = max(dot(normal, light_dir), 0.0);
+    // Half-Lambert wrap for direct diffuse on axis-aligned voxel normals
+    let n_dot_l_wrap = max(dot(normal, light_dir) * 0.7 + 0.3, 0.0);
+
+    // PBR material
+    let f0 = mix(vec3<f32>(0.04), albedo.rgb, PBR_METALLIC);
+
+    // --- Direct lighting: Cook-Torrance ---
+    let sun_above = smoothstep(-0.05, 0.05, light_dir.y);
+    let radiance = sun_color * (u_lighting.light_intensity * 0.1) * (1.0 - shadow) * sun_above;
+
+    // Diffuse uses wrap (fills perpendicular faces), specular uses real n_dot_l
+    var direct = (1.0 - PBR_METALLIC) * albedo.rgb * radiance * n_dot_l_wrap;
+
+    // Add specular only when surface faces the light
+    if n_dot_l > 0.0 {
+        let h_raw = view_dir + light_dir;
+        let h_len_sq = dot(h_raw, h_raw);
+
+        if h_len_sq > 1e-8 {
+            let half_vec = h_raw * inverseSqrt(h_len_sq);
+            let n_dot_h = max(dot(normal, half_vec), 0.0);
+            let v_dot_h = max(dot(view_dir, half_vec), 0.0);
+
+            let D = distribution_ggx(n_dot_h, PBR_ROUGHNESS);
+            let G = geometry_smith(n_dot_v, n_dot_l, PBR_ROUGHNESS);
+            let F = fresnel_schlick(v_dot_h, f0);
+
+            direct += (D * G * F) / max(4.0 * n_dot_v * n_dot_l, 0.001) * radiance * n_dot_l;
+        }
+    }
+
+    // --- Environment lighting: SH irradiance + cubemap specular ---
+    let reflect_dir = reflect(-view_dir, normal);
+    let env_spec = textureSampleLevel(env_cubemap, lut_sampler, reflect_dir, 0.0).rgb;
+    let env_diff = eval_sh_irradiance(normal);
+
+    let F_env = fresnel_schlick_roughness(n_dot_v, f0, PBR_ROUGHNESS);
+    let kd_env = (1.0 - F_env) * (1.0 - PBR_METALLIC);
+
+    // Attenuate sharp specular for rough surfaces (approximation for missing pre-filtered mips)
+    let spec_atten = 1.0 - PBR_ROUGHNESS * PBR_ROUGHNESS;
+
+    let ibl = kd_env * env_diff * albedo.rgb + F_env * env_spec * spec_atten;
+    let lit_color = direct + ibl * u_lighting.ambient;
+
+    // --- Atmospheric post-effects ---
     let ray = world_pos - cam;
     let dist = length(ray);
     let ray_dir = ray / max(dist, 0.001);
@@ -135,7 +226,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let haze = clamp(1.0 - exp(-u_lighting.haze_density * dist), 0.0, 1.0);
     let sun_align = max(dot(ray_dir, light_dir), 0.0);
     // When sun is behind terrain, reduce aerial inscatter near sun direction
-    // (the Mie forward-scatter peak in aerial is wrong when sun is occluded)
     let occ_fade = sun_occluded * smoothstep(0.3, 0.95, sun_align);
     let haze_aerial = aerial.rgb * (1.0 - occ_fade);
     let haze_target = haze_aerial + (1.0 - aerial.a) * lit_color;

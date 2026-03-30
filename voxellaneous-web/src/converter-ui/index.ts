@@ -4,7 +4,6 @@ import {
   convertGLTFFromFolder,
   exportToBinary,
   importFromBinary,
-  createSceneFromResult,
   ConversionResult,
   VoxelizationConfig,
 } from '../converter';
@@ -124,9 +123,8 @@ export function initializeConverterUI(pane: Pane, app: AppData): void {
       state.quantized = currentResult.stats.quantized;
       state.status = 'Conversion complete';
 
-      // Display in renderer
-      const scene = createSceneFromResult(currentResult);
-      app.renderer.uploadScene(scene);
+      // Spawn near player, above ground
+      app.addConvertedObject?.(currentResult);
 
       pane.refresh();
     } catch (error) {
@@ -220,9 +218,8 @@ export function initializeConverterUI(pane: Pane, app: AppData): void {
       state.folderName = file.name;
       state.status = 'Import complete';
 
-      // Display in renderer
-      const scene = createSceneFromResult(currentResult);
-      app.renderer.uploadScene(scene);
+      // Spawn near player, above ground
+      app.addConvertedObject?.(currentResult);
 
       pane.refresh();
     } catch (error) {

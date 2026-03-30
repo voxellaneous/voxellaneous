@@ -83,9 +83,9 @@ export class NetworkClient {
     });
   }
 
-  public sendPosition(x: number, y: number, z: number) {
+  public sendPosition(x: number, y: number, z: number, yaw: number) {
     if (!this.isConnected) return;
-    this.channel.emit('position', { x, y, z }, { reliable: false });
+    this.channel.emit('position', { x, y, z, yaw }, { reliable: false });
   }
 
   private applySnapshot(snapshot: WorldSnapshot) {
@@ -176,7 +176,12 @@ export class NetworkClient {
             z: ent1.position.z + (ent2.position.z - ent1.position.z) * alpha,
           },
           velocity: ent2.velocity,
-          rotation: ent2.rotation,
+          rotation: {
+            x: ent1.rotation.x + (ent2.rotation.x - ent1.rotation.x) * alpha,
+            y: ent1.rotation.y + (ent2.rotation.y - ent1.rotation.y) * alpha,
+            z: ent1.rotation.z + (ent2.rotation.z - ent1.rotation.z) * alpha,
+            w: ent1.rotation.w + (ent2.rotation.w - ent1.rotation.w) * alpha,
+          },
         });
       } else {
         interpolated.push(ent2);
