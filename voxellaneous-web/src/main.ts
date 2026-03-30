@@ -32,7 +32,7 @@ function createUniformVoxelData(size: number, paletteIndex: number): ByteArray {
 }
 
 function createRemoteMarkerObject(
-  id: string,
+  id: number,
   position: { x: number; y: number; z: number },
   voxels: ByteArray,
 ): VoxelObject {
@@ -49,18 +49,6 @@ function createRemoteMarkerObject(
     voxels,
     palette: markerPalette,
   };
-}
-
-function buildRemoteSignature(
-  remotePlayers: Map<string, { id: string; position: { x: number; y: number; z: number } }>,
-) {
-  const entries = Array.from(remotePlayers.values())
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .map((player) => {
-      const { x, y, z } = player.position;
-      return `${player.id}:${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}`;
-    });
-  return entries.join('|');
 }
 
 export type AppData = {
@@ -119,16 +107,17 @@ function registerRecurringAnimation(f: FrameRequestCallback): void {
 async function initializeApp(): Promise<AppData> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsUrl = import.meta.env.VITE_WS_URL || `${wsProtocol}://${window.location.hostname}:8080`;
-  const roomId = import.meta.env.VITE_WS_ROOM || 'lobby';
-  const network = new NetworkClient({ url: wsUrl, roomId });
+  const network = new NetworkClient({ url: `http://${window.location.hostname}` });
 
   const quality = isMobileDevice() ? MOBILE_QUALITY : DESKTOP_QUALITY;
   const renderer = await Renderer.new(canvas, quality);
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0, 0, 1]));
-  cameraModule.setPosition([3770, 300, 620]); // Above terrain level
+
+  network.onSpawn((pos) => {
+    cameraModule.setPosition([pos.x, pos.y, pos.z] as vec3);
+    characterController.setFromEyePosition(cameraModule.position);
+  });
 
   const app: AppData = {
     renderer,
@@ -139,7 +128,7 @@ async function initializeApp(): Promise<AppData> {
     ambient: 0.15,
     sunIlluminance: 10,
     sunDiskScale: 0.8,
-    sunDiskSize: 2, // 0.545,
+    sunDiskSize: 2,
     showBboxes: false,
     cameraModule,
     cameraSpeed: cameraModule.speed,
@@ -150,7 +139,7 @@ async function initializeApp(): Promise<AppData> {
     sunOccSpeed: 0.5,
     sponzaPosition: quality === MOBILE_QUALITY ? { x: 3770, y: 500, z: 620 } : { x: 3770, y: 755, z: 620 },
   };
-  const profilerData: ProfilerData = { fps: 0, frameTime: 0, lastTimeStamp: 0 };
+  const profilerData: ProfilerData = { fps: 0, frameTime: 0, pingMs: 0, lastTimeStamp: 0 };
 
   const { autoresizeCanvas } = createCanvasAutoresize(app);
 
@@ -174,7 +163,6 @@ async function initializeApp(): Promise<AppData> {
   }
 
   // Initialize terrain manager with LOD levels
-  // Uses DEFAULT_TERRAIN_CONFIG for noise layers and other defaults
   const terrainManager = new ChunkManager({ lodLevels: quality.lodLevels }, quality.maxPendingChunkRequests);
   app.terrainManager = terrainManager;
 
@@ -228,29 +216,6 @@ async function initializeApp(): Promise<AppData> {
 
   const markerVoxels = createUniformVoxelData(remoteMarkerSize, 1);
 
-  let lastRemoteSignature = '';
-  const updateRemoteScene = () => {
-    const remotePlayers = network.getRemotePlayers();
-    const signature = buildRemoteSignature(remotePlayers);
-    if (signature === lastRemoteSignature) return;
-    lastRemoteSignature = signature;
-
-    const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
-      createRemoteMarkerObject(player.id, player.position, markerVoxels),
-    );
-    const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
-    renderer.uploadScene({
-      palette: [],
-      objects: remoteObjects,
-      heightmapObjects: heightmapChunks,
-    });
-  };
-
-  const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
-  window.addEventListener('beforeunload', () => {
-    window.clearInterval(remoteSceneInterval);
-  });
-
   // NOW start render loop after scene is uploaded
   let lastFrameTime = 0;
   const render: FrameRequestCallback = (time) => {
@@ -259,6 +224,7 @@ async function initializeApp(): Promise<AppData> {
 
     autoresizeCanvas();
     updateProfilerData(profilerData, time);
+    profilerData.pingMs = network.getPingMs();
 
     cameraModule.updateLook();
 
@@ -287,6 +253,7 @@ async function initializeApp(): Promise<AppData> {
       }
     }
 
+    // Client-side physics (gravity, ground collision, fly/walk)
     if (characterController.isFlying) {
       if (vec3.length(kbMotion) > 0) {
         vec3.scale(kbMotion, kbMotion, cameraModule.speed * dt);
@@ -298,25 +265,22 @@ async function initializeApp(): Promise<AppData> {
       cameraModule.setPosition(eyePos);
     }
 
-    network.setLocalState(
-      { x: cameraModule.position[0], y: cameraModule.position[1], z: cameraModule.position[2] },
-      { x: cameraModule.direction[0], y: cameraModule.direction[1], z: cameraModule.direction[2] },
-    );
+    // Send position to server
+    const [cx, cy, cz] = cameraModule.position;
+    network.sendPosition(cx, cy, cz);
 
-    // Update terrain chunks based on camera position
-    const terrainChanged = app.terrainManager!.update(cameraModule.position);
-    if (terrainChanged) {
-      const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
-      const remotePlayers = network.getRemotePlayers();
-      const remoteObjects = Array.from(remotePlayers.values()).map((player) =>
-        createRemoteMarkerObject(player.id, player.position, markerVoxels),
-      );
-      renderer.uploadScene({
-        palette: [],
-        objects: remoteObjects,
-        heightmapObjects: heightmapChunks,
-      });
-    }
+    // Update remote players + terrain every frame for smooth interpolation
+    const remoteEntities = network.getRemoteEntities();
+    const remoteObjects = remoteEntities.map((entity) =>
+      createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
+    );
+    const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
+    app.terrainManager!.update(cameraModule.position);
+    renderer.uploadScene({
+      palette: [],
+      objects: remoteObjects,
+      heightmapObjects: heightmapChunks,
+    });
 
     // Update shadow clipmap from terrain cache and upload dirty levels
     if (shadowClipmap.update(cameraModule.position[0], cameraModule.position[2], terrainManager.cacheGeneration)) {
@@ -334,14 +298,11 @@ async function initializeApp(): Promise<AppData> {
     }
 
     // Sun traces a great circle tilted 75° from the horizon
-    // phase=0 at 6h (sunrise), PI/2 at noon (peak), PI at 18h (sunset)
     const tilt = (75 * Math.PI) / 180;
     const phase = ((app.sunTime - 6) / 24) * 2 * Math.PI;
-    // Sun in orbit frame, then tilt around X axis
     const sx = Math.cos(phase);
     const sy = Math.sin(phase) * Math.sin(tilt);
     const sz = -Math.sin(phase) * Math.cos(tilt);
-    // Rotate around Y by sunAngle to orient the orbit
     const azimRad = (app.sunAngle * Math.PI) / 180;
     reusableLightDir[0] = sx * Math.cos(azimRad) + sz * Math.sin(azimRad);
     reusableLightDir[1] = sy;
@@ -369,10 +330,6 @@ async function initializeApp(): Promise<AppData> {
   registerRecurringAnimation(render);
 
   initializeDevTools(app, profilerData);
-  network.start();
-  window.addEventListener('beforeunload', () => {
-    network.stop();
-  });
 
   // Hide loading indicator
   document.getElementById('loading')?.classList.add('hidden');

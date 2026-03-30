@@ -1,498 +1,210 @@
-type Vector3 = { x: number; y: number; z: number };
-
-export type RemotePlayerState = {
-  id: string;
-  position: Vector3;
-  direction: Vector3;
-  timestamp: number;
-};
+import geckos, { ClientChannel } from '@geckos.io/client';
+import {
+  EntityState,
+  WorldSnapshot,
+  decodeNetMessage,
+  NetPacketType,
+} from '../../voxellaneous-common/src/netcode';
 
 type NetworkOptions = {
   url: string;
-  roomId: string;
-  stateHz?: number;
-  pingMs?: number;
-  reconnectMs?: number;
 };
-
-type LocalState = {
-  position: Vector3;
-  direction: Vector3;
-};
-
-const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-
-type UnknownRecord = Record<string, unknown>;
-
-type JoinPayload = {
-  peerId?: string;
-  peers?: string[];
-  error?: string;
-};
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return value !== null && typeof value === 'object';
-}
-
-function isVector3(value: unknown): value is Vector3 {
-  if (!isRecord(value)) return false;
-  return typeof value.x === 'number' && typeof value.y === 'number' && typeof value.z === 'number';
-}
-
-function parseJoinPayload(payload: unknown): JoinPayload | null {
-  if (!isRecord(payload)) return null;
-  const peers = Array.isArray(payload.peers)
-    ? payload.peers.filter((id) => typeof id === 'string')
-    : undefined;
-  return {
-    peerId: typeof payload.peerId === 'string' ? payload.peerId : undefined,
-    peers,
-    error: typeof payload.error === 'string' ? payload.error : undefined,
-  };
-}
-
-function parseFromPayload(payload: unknown): { from: string; sdp?: string; candidate?: string } | null {
-  if (!isRecord(payload)) return null;
-  if (typeof payload.from !== 'string') return null;
-  return {
-    from: payload.from,
-    sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
-    candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
-  };
-}
-
-function parseLeavePayload(payload: unknown): { id: string } | null {
-  if (!isRecord(payload)) return null;
-  if (typeof payload.id !== 'string') return null;
-  return { id: payload.id };
-}
 
 export class NetworkClient {
-  private ws: WebSocket | null = null;
-  private peerId: string | null = null;
-  private readonly remotePlayers = new Map<string, RemotePlayerState>();
-  private readonly peerConnections = new Map<string, RTCPeerConnection>();
-  private readonly dataChannels = new Map<string, RTCDataChannel>();
-  private readonly url: string;
-  private readonly roomId: string;
-  private readonly stateHz: number;
-  private readonly pingMs: number;
-  private readonly reconnectMs: number;
-  private localState: LocalState | null = null;
-  private stateInterval: number | null = null;
-  private pingInterval: number | null = null;
-  private reconnectTimeout: number | null = null;
-  private manualClose = false;
+  private channel: ClientChannel;
+  private entities: Map<number | 'ME', EntityState> = new Map();
+  private myId: number | null = null;
+  private snapshots: (WorldSnapshot & { receivedAt: number })[] = [];
+  private lastSnapshotSeq: number | null = null;
+  private isConnected = false;
+  private lastRttMs = 0;
+  private pingIntervalId: number | null = null;
+  private snapshotState: Map<number, EntityState> = new Map();
+  private lastAppliedSequence: number | null = null;
+  private lastResyncAt = 0;
+  private spawnPosition: { x: number; y: number; z: number } | null = null;
+  private onSpawnCallback: ((pos: { x: number; y: number; z: number }) => void) | null = null;
 
-  constructor(options: NetworkOptions) {
-    this.url = options.url;
-    this.roomId = options.roomId;
-    this.stateHz = options.stateHz ?? 20;
-    this.pingMs = options.pingMs ?? 5000;
-    this.reconnectMs = options.reconnectMs ?? 1000;
-  }
+  constructor(_options: NetworkOptions) {
+    const port = 8080;
+    const url = `${window.location.protocol}//${window.location.hostname}`;
 
-  start(): void {
-    this.manualClose = false;
-    this.connect();
-    this.startIntervals();
-  }
+    console.log(`Connecting to Geckos: url=${url}, port=${port}`);
+    this.channel = geckos({ url, port });
 
-  stop(): void {
-    this.manualClose = true;
-    this.clearIntervals();
-    this.clearReconnect();
-    this.sendLeave('client_close');
-    this.remotePlayers.clear();
-    this.closePeerConnections();
-    this.peerId = null;
-    this.closeSocket();
-  }
-
-  setLocalState(position: Vector3, direction: Vector3): void {
-    this.localState = { position, direction };
-  }
-
-  getRemotePlayers(): Map<string, RemotePlayerState> {
-    return this.remotePlayers;
-  }
-
-  getPeerId(): string | null {
-    return this.peerId;
-  }
-
-  private connect(): void {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
-
-    const ws = new WebSocket(this.url);
-    this.ws = ws;
-
-    ws.addEventListener('open', () => {
-      this.sendJoin();
-    });
-
-    ws.addEventListener('close', () => {
-      this.peerId = null;
-      this.remotePlayers.clear();
-      this.closePeerConnections();
-      if (!this.manualClose) this.scheduleReconnect();
-    });
-
-    ws.addEventListener('message', (event) => {
-      this.handleMessage(event.data);
-    });
-  }
-
-  private closeSocket(): void {
-    if (!this.ws) return;
-    try {
-      this.ws.close();
-    } catch {
-      // ignore
-    }
-    this.ws = null;
-  }
-
-  private closePeerConnections(): void {
-    for (const [peerId, channel] of this.dataChannels.entries()) {
-      try {
-        channel.close();
-      } catch {
-        // ignore
+    this.channel.onConnect((error) => {
+      if (error) {
+        console.error('Network connection error:', error.message);
+        return;
       }
-      this.dataChannels.delete(peerId);
-    }
-    for (const [peerId, pc] of this.peerConnections.entries()) {
-      try {
-        pc.close();
-      } catch {
-        // ignore
-      }
-      this.peerConnections.delete(peerId);
-    }
-  }
 
-  private scheduleReconnect(): void {
-    if (this.reconnectTimeout !== null) return;
-    this.reconnectTimeout = window.setTimeout(() => {
-      this.reconnectTimeout = null;
-      this.connect();
-    }, this.reconnectMs);
-  }
+      console.log('Connected to server!');
+      this.isConnected = true;
 
-  private clearReconnect(): void {
-    if (this.reconnectTimeout === null) return;
-    window.clearTimeout(this.reconnectTimeout);
-    this.reconnectTimeout = null;
-  }
-
-  private startIntervals(): void {
-    if (this.stateInterval === null) {
-      const intervalMs = Math.round(1000 / this.stateHz);
-      this.stateInterval = window.setInterval(() => this.sendState(), intervalMs);
-    }
-    if (this.pingInterval === null) {
-      this.pingInterval = window.setInterval(() => this.sendPing(), this.pingMs);
-    }
-  }
-
-  private clearIntervals(): void {
-    if (this.stateInterval !== null) {
-      window.clearInterval(this.stateInterval);
-      this.stateInterval = null;
-    }
-    if (this.pingInterval !== null) {
-      window.clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
-  }
-
-  private sendJson(message: unknown): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify(message));
-  }
-
-  private sendJoin(): void {
-    this.sendJson({
-      type: 'join',
-      roomId: this.roomId,
-      payload: { clientId: 'web-0.1' },
-    });
-  }
-
-  private sendPing(): void {
-    this.sendJson({
-      type: 'ping',
-      roomId: this.roomId,
-      payload: { timestamp: Date.now() },
-    });
-  }
-
-  private sendState(): void {
-    if (!this.peerId || !this.localState) return;
-    const message = JSON.stringify({
-      type: 'state',
-      payload: {
-        id: this.peerId,
-        position: this.localState.position,
-        direction: this.localState.direction,
-        timestamp: Date.now(),
-      },
-    });
-    for (const channel of this.dataChannels.values()) {
-      if (channel.readyState === 'open') {
-        channel.send(message);
-      }
-    }
-  }
-
-  private handleMessage(data: unknown): void {
-    if (typeof data !== 'string') return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      return;
-    }
-    if (!isRecord(parsed) || typeof parsed.type !== 'string') return;
-    const message = parsed;
-
-    switch (message.type) {
-      case 'join':
-        this.handleJoin(message.payload);
-        break;
-      case 'leave':
-        this.handleLeave(message.payload);
-        break;
-      case 'offer':
-        this.handleOffer(message.payload);
-        break;
-      case 'answer':
-        this.handleAnswer(message.payload);
-        break;
-      case 'ice':
-        this.handleIce(message.payload);
-        break;
-      case 'pong':
-        break;
-      default:
-        break;
-    }
-  }
-
-  private handleJoin(payload: unknown): void {
-    const joinPayload = parseJoinPayload(payload);
-    if (!joinPayload) return;
-    if (joinPayload.error === 'room_full') return;
-    if (joinPayload.peerId && !this.peerId) {
-      this.peerId = joinPayload.peerId;
-    }
-    if (joinPayload.peers) {
-      for (const peerId of joinPayload.peers) {
-        this.maybeConnectToPeer(peerId);
-      }
-      return;
-    }
-    if (joinPayload.peerId && joinPayload.peerId !== this.peerId) {
-      this.maybeConnectToPeer(joinPayload.peerId);
-    }
-  }
-
-  private handleOffer(payload: unknown): void {
-    const data = parseFromPayload(payload);
-    if (!data || !data.sdp) return;
-    const peerId = data.from;
-    const pc = this.ensurePeerConnection(peerId, false);
-    pc.setRemoteDescription({ type: 'offer', sdp: data.sdp })
-      .then(() => pc.createAnswer())
-      .then((answer) => pc.setLocalDescription(answer))
-      .then(() => {
-        if (!pc.localDescription) return;
-        this.sendJson({
-          type: 'answer',
-          roomId: this.roomId,
-          payload: {
-            to: peerId,
-            sdp: pc.localDescription.sdp,
-          },
-        });
-      })
-      .catch(() => {
-        // ignore
-      });
-  }
-
-  private handleAnswer(payload: unknown): void {
-    const data = parseFromPayload(payload);
-    if (!data || !data.sdp) return;
-    const pc = this.peerConnections.get(data.from);
-    if (!pc) return;
-    pc.setRemoteDescription({ type: 'answer', sdp: data.sdp }).catch(() => {
-      // ignore
-    });
-  }
-
-  private handleIce(payload: unknown): void {
-    const data = parseFromPayload(payload);
-    if (!data || !data.candidate) return;
-    const pc = this.peerConnections.get(data.from);
-    if (!pc) return;
-    let parsedCandidate: unknown;
-    try {
-      parsedCandidate = JSON.parse(data.candidate);
-    } catch {
-      return;
-    }
-    if (!isRecord(parsedCandidate) || typeof parsedCandidate.candidate !== 'string') return;
-    const candidate: RTCIceCandidateInit = {
-      candidate: parsedCandidate.candidate,
-      sdpMid: typeof parsedCandidate.sdpMid === 'string' ? parsedCandidate.sdpMid : undefined,
-      sdpMLineIndex:
-        typeof parsedCandidate.sdpMLineIndex === 'number' ? parsedCandidate.sdpMLineIndex : undefined,
-      usernameFragment:
-        typeof parsedCandidate.usernameFragment === 'string'
-          ? parsedCandidate.usernameFragment
-          : undefined,
-    };
-    pc.addIceCandidate(candidate).catch(() => {
-      // ignore
-    });
-  }
-
-  private handleLeave(payload: unknown): void {
-    const data = parseLeavePayload(payload);
-    if (!data) return;
-    this.cleanupPeer(data.id);
-  }
-
-  private sendLeave(reason: string): void {
-    if (!this.peerId) return;
-    this.sendJson({
-      type: 'leave',
-      roomId: this.roomId,
-      payload: {
-        clientId: this.peerId,
-        reason,
-      },
-    });
-  }
-
-  private maybeConnectToPeer(peerId: string): void {
-    if (!this.peerId || peerId === this.peerId) return;
-    const initiator = this.peerId.localeCompare(peerId) < 0;
-    const pc = this.ensurePeerConnection(peerId, initiator);
-    if (initiator) {
-      pc.createOffer()
-        .then((offer) => pc.setLocalDescription(offer))
-        .then(() => {
-          if (!pc.localDescription) return;
-          this.sendJson({
-            type: 'offer',
-            roomId: this.roomId,
-            payload: {
-              to: peerId,
-              sdp: pc.localDescription.sdp,
-            },
-          });
-        })
-        .catch(() => {
-          // ignore
-        });
-    }
-  }
-
-  private ensurePeerConnection(peerId: string, initiator: boolean): RTCPeerConnection {
-    const existing = this.peerConnections.get(peerId);
-    if (existing) return existing;
-    const pc = new RTCPeerConnection({ iceServers });
-    this.peerConnections.set(peerId, pc);
-
-    pc.onicecandidate = (event) => {
-      if (!event.candidate) return;
-      this.sendJson({
-        type: 'ice',
-        roomId: this.roomId,
-        payload: {
-          to: peerId,
-          candidate: JSON.stringify(event.candidate),
-        },
-      });
-    };
-
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-        this.cleanupPeer(peerId);
-        if (!this.manualClose && this.peerId) {
-          this.maybeConnectToPeer(peerId);
+      this.channel.on('welcome', (data: any) => {
+        this.myId = typeof data?.id === 'number' ? data.id : Number(data?.id);
+        console.log('My Player ID:', this.myId);
+        if (data?.spawn && typeof data.spawn.x === 'number') {
+          this.spawnPosition = data.spawn;
+          this.onSpawnCallback?.(data.spawn);
         }
+      });
+
+      this.channel.on('snapshot', (data: any) => {
+        this.handleSnapshot(data as WorldSnapshot);
+      });
+
+      this.channel.on('pong', (data: any) => {
+        if (!data || typeof data.clientTime !== 'number') return;
+        this.lastRttMs = Date.now() - data.clientTime;
+      });
+
+      if (this.pingIntervalId === null) {
+        this.pingIntervalId = window.setInterval(() => {
+          this.channel.emit('ping', { clientTime: Date.now() });
+        }, 1000);
       }
-    };
 
-    pc.ondatachannel = (event) => {
-      this.setupDataChannel(peerId, event.channel);
-    };
-
-    if (initiator) {
-      const channel = pc.createDataChannel('state');
-      this.setupDataChannel(peerId, channel);
-    }
-
-    return pc;
-  }
-
-  private setupDataChannel(peerId: string, channel: RTCDataChannel): void {
-    this.dataChannels.set(peerId, channel);
-
-    channel.onmessage = (event) => {
-      this.handleDataMessage(event.data);
-    };
-  }
-
-  private handleDataMessage(data: unknown): void {
-    if (typeof data !== 'string') return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      return;
-    }
-    if (!isRecord(parsed) || parsed.type !== 'state') return;
-    const payload = isRecord(parsed.payload) ? parsed.payload : null;
-    if (!payload || typeof payload.id !== 'string') return;
-    if (payload.id === this.peerId) return;
-    if (!isVector3(payload.position) || !isVector3(payload.direction)) return;
-    if (typeof payload.timestamp !== 'number') return;
-
-    this.remotePlayers.set(payload.id, {
-      id: payload.id,
-      position: payload.position,
-      direction: payload.direction,
-      timestamp: payload.timestamp,
+      const rawChannel = this.channel as any;
+      if (typeof rawChannel.onRaw === 'function') {
+        rawChannel.onRaw((data: any) => {
+          try {
+            const message = decodeNetMessage(data);
+            if (message.type === NetPacketType.SnapshotFull) {
+              this.handleSnapshot(message.snapshot);
+            } else if (message.type === NetPacketType.SnapshotDelta) {
+              this.handleDelta(message.delta);
+            }
+          } catch (e) {
+            console.error('Failed to decode binary snapshot:', e);
+          }
+        });
+      }
     });
   }
 
-  private cleanupPeer(peerId: string): void {
-    const channel = this.dataChannels.get(peerId);
-    if (channel) {
-      try {
-        channel.close();
-      } catch {
-        // ignore
-      }
-      this.dataChannels.delete(peerId);
+  public sendPosition(x: number, y: number, z: number) {
+    if (!this.isConnected) return;
+    this.channel.emit('position', { x, y, z }, { reliable: false });
+  }
+
+  private applySnapshot(snapshot: WorldSnapshot) {
+    this.lastSnapshotSeq = snapshot.sequence;
+    this.lastAppliedSequence = snapshot.sequence;
+
+    this.snapshots.push({ ...snapshot, receivedAt: Date.now() });
+    if (this.snapshots.length > 30) {
+      this.snapshots.shift();
     }
-    const pc = this.peerConnections.get(peerId);
-    if (pc) {
-      try {
-        pc.close();
-      } catch {
-        // ignore
-      }
-      this.peerConnections.delete(peerId);
+
+    this.entities.clear();
+    for (const entity of snapshot.entities) {
+      this.entities.set(entity.id === this.myId ? 'ME' : entity.id, entity);
     }
-    this.remotePlayers.delete(peerId);
+  }
+
+  private handleSnapshot(snapshot: WorldSnapshot) {
+    if (this.lastSnapshotSeq !== null && snapshot.sequence <= this.lastSnapshotSeq) {
+      return;
+    }
+    this.snapshotState.clear();
+    for (const entity of snapshot.entities) {
+      this.snapshotState.set(entity.id, entity);
+    }
+    this.applySnapshot(snapshot);
+  }
+
+  private handleDelta(delta: {
+    timestamp: number;
+    sequence: number;
+    lastProcessedInputSeq: number;
+    baseSequence: number;
+    entities: EntityState[];
+    removedIds: number[];
+  }) {
+    if (this.lastAppliedSequence === null || delta.baseSequence !== this.lastAppliedSequence) {
+      this.requestResync();
+      return;
+    }
+
+    for (const entity of delta.entities) {
+      this.snapshotState.set(entity.id, entity);
+    }
+    for (const id of delta.removedIds) {
+      this.snapshotState.delete(id);
+    }
+
+    this.applySnapshot({
+      timestamp: delta.timestamp,
+      sequence: delta.sequence,
+      lastProcessedInputSeq: delta.lastProcessedInputSeq,
+      entities: Array.from(this.snapshotState.values()),
+    });
+  }
+
+  public getRemoteEntities(): EntityState[] {
+    const INTERPOLATION_DELAY_MS = 45;
+    if (this.snapshots.length < 2) return [];
+
+    const renderTime = Date.now() - INTERPOLATION_DELAY_MS;
+
+    let t1 = this.snapshots[0];
+    let t2 = this.snapshots[1];
+    for (let i = 0; i < this.snapshots.length - 1; i++) {
+      if (this.snapshots[i].receivedAt <= renderTime && this.snapshots[i + 1].receivedAt >= renderTime) {
+        t1 = this.snapshots[i];
+        t2 = this.snapshots[i + 1];
+        break;
+      }
+    }
+
+    if (renderTime > t2.receivedAt) t1 = t2;
+
+    const total = t2.receivedAt - t1.receivedAt;
+    const alpha = Math.max(0, Math.min(1, total > 0 ? (renderTime - t1.receivedAt) / total : 0));
+
+    const interpolated: EntityState[] = [];
+    for (const ent2 of t2.entities) {
+      if (ent2.id === this.myId) continue;
+      const ent1 = t1.entities.find(e => e.id === ent2.id);
+      if (ent1) {
+        interpolated.push({
+          id: ent2.id,
+          position: {
+            x: ent1.position.x + (ent2.position.x - ent1.position.x) * alpha,
+            y: ent1.position.y + (ent2.position.y - ent1.position.y) * alpha,
+            z: ent1.position.z + (ent2.position.z - ent1.position.z) * alpha,
+          },
+          velocity: ent2.velocity,
+          rotation: ent2.rotation,
+        });
+      } else {
+        interpolated.push(ent2);
+      }
+    }
+    return interpolated;
+  }
+
+  public getPingMs(): number {
+    return this.lastRttMs;
+  }
+
+  public onSpawn(cb: (pos: { x: number; y: number; z: number }) => void): void {
+    if (this.spawnPosition) { cb(this.spawnPosition); return; }
+    this.onSpawnCallback = cb;
+  }
+
+  private requestResync() {
+    const now = Date.now();
+    if (now - this.lastResyncAt < 1000) return;
+    this.lastResyncAt = now;
+    this.snapshots.length = 0;
+    this.snapshotState.clear();
+    this.lastAppliedSequence = null;
+    this.lastSnapshotSeq = null;
+    const channelAny = this.channel as any;
+    if (typeof channelAny.emit === 'function') {
+      channelAny.emit('resync', {}, { reliable: true });
+    }
   }
 }

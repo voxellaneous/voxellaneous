@@ -1,267 +1,268 @@
 import http from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
-
-type Peer = {
-  ws: WebSocket;
-  peerId: string | null;
-  roomId: string | null;
-  lastSeen: number;
-};
-
-type UnknownRecord = Record<string, unknown>;
+import geckos, { GeckosServer, ServerChannel } from '@geckos.io/server';
+import {
+  EntityState,
+  WorldSnapshot,
+  encodeWorldSnapshot,
+  encodeWorldDelta,
+  SnapshotDelta,
+} from '../voxellaneous-common/src/netcode';
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
-const DEFAULT_ROOM = process.env.DEFAULT_ROOM || 'lobby';
-const TIMEOUT_MS = Number.parseInt(process.env.TIMEOUT_MS || '15000', 10);
-const CLEANUP_INTERVAL_MS = Number.parseInt(process.env.CLEANUP_INTERVAL_MS || '5000', 10);
-const MAX_PEERS = Number.parseInt(process.env.MAX_PEERS || '8', 10);
+const PLAYER_TIMEOUT_MS = Number.parseInt(process.env.PLAYER_TIMEOUT_MS || '300000', 10);
+const INTEREST_RADIUS = Number.parseInt(process.env.INTEREST_RADIUS || '1000', 10);
 
-const server = http.createServer();
-const wss = new WebSocketServer({ server });
+type PlayerEntity = {
+  id: number;
+  position: { x: number; y: number; z: number };
+  velocity: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number; w: number };
+  channel: ServerChannel;
+  lastInputTime: number;
+};
 
-const rooms = new Map<string, Map<string, Peer>>();
-let peerCounter = 0;
+class GameServer {
+  private io: GeckosServer;
+  private players: Map<number, PlayerEntity> = new Map();
+  private nextPlayerId = 1;
+  private lastNetworkBroadcast: number = 0;
+  private snapshotSequence: number = 0;
+  private lastSnapshotStateByPlayer: Map<number, Map<number, EntityState>> = new Map();
+  private lastSnapshotSeqByPlayer: Map<number, number> = new Map();
+  private readonly fullSnapshotInterval = 10;
+  private forceFullForPlayer: Set<number> = new Set();
+  private metrics = {
+    snapshotsSent: 0,
+    deltasSent: 0,
+    bytesSent: 0,
+    snapshotBytes: 0,
+    deltaBytes: 0,
+    lastLogAt: Date.now(),
+  };
 
-function getRoom(roomId: string): Map<string, Peer> {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, new Map());
+  constructor() {
+    this.io = geckos({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+      ],
+    });
+
+    this.io.addServer(http.createServer().listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
+    }));
+
+    this.io.onConnection((channel: ServerChannel) => {
+      console.log(`Player connected: ${channel.id}`);
+      this.handleConnection(channel);
+    });
   }
-  return rooms.get(roomId)!;
-}
 
-function generatePeerId(): string {
-  peerCounter += 1;
-  return `peer-${peerCounter}-${Math.random().toString(36).slice(2, 8)}`;
-}
+  private handleConnection(channel: ServerChannel) {
+    const playerId = this.nextPlayerId >>> 0;
+    this.nextPlayerId = (this.nextPlayerId + 1) >>> 0;
 
-function safeJsonParse(data: string): unknown | null {
-  try {
-    return JSON.parse(data);
-  } catch {
-    return null;
+    const player: PlayerEntity = {
+      id: playerId,
+      position: { x: 3770, y: 300, z: 620 },
+      velocity: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 },
+      channel,
+      lastInputTime: Date.now(),
+    };
+
+    this.players.set(playerId, player);
+    channel.emit('welcome', { id: playerId, spawn: player.position }, { reliable: true });
+
+    channel.onDisconnect(() => {
+      console.log(`Player disconnected: ${playerId}`);
+      this.players.delete(playerId);
+      this.lastSnapshotStateByPlayer.delete(playerId);
+      this.lastSnapshotSeqByPlayer.delete(playerId);
+      this.forceFullForPlayer.delete(playerId);
+    });
+
+    channel.on('ping', (data: any) => {
+      const clientTime = typeof data?.clientTime === 'number' ? data.clientTime : Date.now();
+      channel.emit('pong', { clientTime, serverTime: Date.now() });
+    });
+
+    channel.on('resync', () => {
+      this.forceFullForPlayer.add(playerId);
+      this.lastSnapshotStateByPlayer.delete(playerId);
+      this.lastSnapshotSeqByPlayer.delete(playerId);
+    });
+
+    channel.on('position', (data: any) => {
+      if (!data || typeof data.x !== 'number' || typeof data.y !== 'number' || typeof data.z !== 'number') return;
+      const x = Number.isFinite(data.x) ? data.x : 0;
+      const y = Number.isFinite(data.y) ? data.y : 0;
+      const z = Number.isFinite(data.z) ? data.z : 0;
+
+      player.position.x = x;
+      player.position.y = y;
+      player.position.z = z;
+      player.lastInputTime = Date.now();
+    });
   }
-}
 
-function isRecord(value: unknown): value is UnknownRecord {
-  return value !== null && typeof value === 'object';
-}
-
-function sendJson(ws: WebSocket, message: unknown): void {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(JSON.stringify(message));
+  public start() {
+    setInterval(() => this.tick(), 1000 / 60);
   }
-}
 
-function broadcast(roomId: string, message: unknown, excludePeerId?: string): void {
-  const room = rooms.get(roomId);
-  if (!room) return;
-  for (const [peerId, peer] of room.entries()) {
-    if (excludePeerId && peerId === excludePeerId) continue;
-    sendJson(peer.ws, message);
+  private tick() {
+    const now = Date.now();
+    const NETWORK_INTERVAL_MS = 1000 / 60;
+
+    if (now - this.lastNetworkBroadcast >= NETWORK_INTERVAL_MS) {
+      this.broadcastSnapshot(now);
+      this.lastNetworkBroadcast = now;
+    }
+
+    this.players.forEach((player) => {
+      if (now - player.lastInputTime > PLAYER_TIMEOUT_MS) {
+        console.log(`Player ${player.id} timed out (AFK)`);
+        player.channel.close();
+        this.players.delete(player.id);
+      }
+    });
   }
-}
 
-function removePeer(peer: Peer, reason: string): void {
-  if (!peer.roomId || !peer.peerId) return;
-  const room = rooms.get(peer.roomId);
-  if (!room) return;
+  private broadcastSnapshot(timestamp: number) {
+    const sequence = this.snapshotSequence >>> 0;
+    const allEntities: EntityState[] = Array.from(this.players.values()).map(p => ({
+      id: p.id,
+      position: p.position,
+      velocity: p.velocity,
+      rotation: p.rotation,
+    }));
 
-  if (room.has(peer.peerId)) {
-    room.delete(peer.peerId);
-    broadcast(
-      peer.roomId,
-      {
-        type: 'leave',
-        roomId: peer.roomId,
-        payload: {
-          id: peer.peerId,
-          reason,
-        },
-      },
-      peer.peerId,
+    for (const player of this.players.values()) {
+      const entities = this.filterEntitiesForPlayer(player, allEntities);
+      const lastState = this.lastSnapshotStateByPlayer.get(player.id) ?? new Map();
+      const sendFull = this.forceFullForPlayer.has(player.id) || lastState.size === 0 || (sequence % this.fullSnapshotInterval === 0);
+
+      if (sendFull || !player.channel.raw) {
+        const snapshot: WorldSnapshot = {
+          timestamp,
+          sequence,
+          lastProcessedInputSeq: 0,
+          entities,
+        };
+        const payload = encodeWorldSnapshot(snapshot);
+        this.sendSnapshotPayloadToChannel(player.channel, payload, snapshot);
+        this.metrics.snapshotsSent += 1;
+        this.metrics.bytesSent += payload.byteLength;
+        this.metrics.snapshotBytes += payload.byteLength;
+        this.lastSnapshotStateByPlayer.set(player.id, this.cloneStateMap(entities));
+        this.lastSnapshotSeqByPlayer.set(player.id, sequence);
+        this.forceFullForPlayer.delete(player.id);
+      } else {
+        const lastSeq = this.lastSnapshotSeqByPlayer.get(player.id) ?? 0;
+        const delta = this.buildDeltaSnapshot(timestamp, sequence, 0, lastSeq, entities, lastState);
+        const payload = encodeWorldDelta(delta);
+        this.sendSnapshotPayloadToChannel(player.channel, payload);
+        this.metrics.deltasSent += 1;
+        this.metrics.bytesSent += payload.byteLength;
+        this.metrics.deltaBytes += payload.byteLength;
+        this.lastSnapshotStateByPlayer.set(player.id, this.cloneStateMap(entities));
+        this.lastSnapshotSeqByPlayer.set(player.id, sequence);
+      }
+    }
+
+    this.snapshotSequence = (this.snapshotSequence + 1) >>> 0;
+    this.logMetrics();
+  }
+
+  private logMetrics() {
+    const now = Date.now();
+    if (now - this.metrics.lastLogAt < 5000) return;
+    const seconds = (now - this.metrics.lastLogAt) / 1000;
+    const payload = {
+      type: 'net',
+      snapshotsPerSec: Number((this.metrics.snapshotsSent / seconds).toFixed(1)),
+      deltasPerSec: Number((this.metrics.deltasSent / seconds).toFixed(1)),
+      kbps: Number((this.metrics.bytesSent / seconds / 1024).toFixed(1)),
+      avgSnapshotBytes: this.metrics.snapshotsSent > 0 ? Number((this.metrics.snapshotBytes / this.metrics.snapshotsSent).toFixed(1)) : 0,
+      avgDeltaBytes: this.metrics.deltasSent > 0 ? Number((this.metrics.deltaBytes / this.metrics.deltasSent).toFixed(1)) : 0,
+      players: this.players.size,
+    };
+    console.log(JSON.stringify(payload));
+    Object.assign(this.metrics, {
+      snapshotsSent: 0, deltasSent: 0, bytesSent: 0,
+      snapshotBytes: 0, deltaBytes: 0, lastLogAt: now,
+    });
+  }
+
+  private buildDeltaSnapshot(
+    timestamp: number,
+    sequence: number,
+    lastProcessedInputSeq: number,
+    baseSequence: number,
+    entities: EntityState[],
+    lastState: Map<number, EntityState>,
+  ): SnapshotDelta {
+    const changed: EntityState[] = [];
+    const currentIds = new Set<number>();
+
+    for (const entity of entities) {
+      currentIds.add(entity.id);
+      const prev = lastState.get(entity.id);
+      if (!prev || !this.isEntityEqual(prev, entity)) {
+        changed.push(entity);
+      }
+    }
+
+    const removedIds: number[] = [];
+    for (const prevId of lastState.keys()) {
+      if (!currentIds.has(prevId)) {
+        removedIds.push(prevId);
+      }
+    }
+
+    return { timestamp, sequence, lastProcessedInputSeq, baseSequence, entities: changed, removedIds };
+  }
+
+  private isEntityEqual(a: EntityState, b: EntityState): boolean {
+    return (
+      a.position.x === b.position.x &&
+      a.position.y === b.position.y &&
+      a.position.z === b.position.z &&
+      a.velocity.x === b.velocity.x &&
+      a.velocity.y === b.velocity.y &&
+      a.velocity.z === b.velocity.z &&
+      a.rotation.x === b.rotation.x &&
+      a.rotation.y === b.rotation.y &&
+      a.rotation.z === b.rotation.z &&
+      a.rotation.w === b.rotation.w
     );
   }
 
-  if (room.size === 0) {
-    rooms.delete(peer.roomId);
-  }
-
-  peer.peerId = null;
-  peer.roomId = null;
-}
-
-function coerceRoomId(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number') return value.toString();
-  return DEFAULT_ROOM;
-}
-
-function handleJoin(peer: Peer, message: UnknownRecord): void {
-  const roomId = coerceRoomId(message.roomId);
-  const room = getRoom(roomId);
-
-  if (room.size >= MAX_PEERS) {
-    sendJson(peer.ws, {
-      type: 'join',
-      roomId,
-      payload: {
-        error: 'room_full',
-      },
-    });
-    return;
-  }
-
-  if (!peer.peerId) {
-    peer.peerId = generatePeerId();
-  }
-
-  peer.roomId = roomId;
-  peer.lastSeen = Date.now();
-  room.set(peer.peerId, peer);
-
-  const peers = Array.from(room.keys()).filter((id) => id !== peer.peerId);
-
-  sendJson(peer.ws, {
-    type: 'join',
-    roomId,
-    payload: {
-      peerId: peer.peerId,
-      peers,
-    },
-  });
-
-  broadcast(
-    roomId,
-    {
-      type: 'join',
-      roomId,
-      payload: {
-        peerId: peer.peerId,
-      },
-    },
-    peer.peerId,
-  );
-}
-
-function handleLeave(peer: Peer, message: UnknownRecord): void {
-  if (!peer.peerId || !peer.roomId) return;
-  peer.lastSeen = Date.now();
-  const payload = isRecord(message.payload) ? message.payload : undefined;
-  const reason =
-    payload && typeof payload.reason === 'string' ? payload.reason : 'client_close';
-  removePeer(peer, reason);
-}
-
-function handlePing(peer: Peer): void {
-  if (!peer.peerId || !peer.roomId) return;
-  peer.lastSeen = Date.now();
-  sendJson(peer.ws, {
-    type: 'pong',
-    roomId: peer.roomId,
-    payload: {
-      timestamp: Date.now(),
-    },
-  });
-}
-
-function parseTargetPayload(payload: unknown): { to: string; sdp?: string; candidate?: string } | null {
-  if (!isRecord(payload)) return null;
-  if (typeof payload.to !== 'string') return null;
-  return {
-    to: payload.to,
-    sdp: typeof payload.sdp === 'string' ? payload.sdp : undefined,
-    candidate: typeof payload.candidate === 'string' ? payload.candidate : undefined,
-  };
-}
-
-function forwardToPeer(peer: Peer, message: UnknownRecord, type: string): void {
-  if (!peer.peerId || !peer.roomId) return;
-  const payload = parseTargetPayload(message.payload);
-  if (!payload) return;
-
-  const room = rooms.get(peer.roomId);
-  if (!room) return;
-  const target = room.get(payload.to);
-  if (!target) return;
-
-  sendJson(target.ws, {
-    type,
-    roomId: peer.roomId,
-    payload: {
-      from: peer.peerId,
-      to: payload.to,
-      sdp: payload.sdp,
-      candidate: payload.candidate,
-    },
-  });
-}
-
-function handleMessage(peer: Peer, data: WebSocket.RawData): void {
-  const text = typeof data === 'string' ? data : data.toString('utf8');
-  const message = safeJsonParse(text);
-  if (!message || !isRecord(message) || typeof message.type !== 'string') {
-    return;
-  }
-
-  switch (message.type) {
-    case 'join':
-      handleJoin(peer, message);
-      break;
-    case 'leave':
-      handleLeave(peer, message);
-      break;
-    case 'offer':
-      forwardToPeer(peer, message, 'offer');
-      break;
-    case 'answer':
-      forwardToPeer(peer, message, 'answer');
-      break;
-    case 'ice':
-      forwardToPeer(peer, message, 'ice');
-      break;
-    case 'ping':
-      handlePing(peer);
-      break;
-    default:
-      break;
-  }
-}
-
-wss.on('connection', (ws) => {
-  const peer: Peer = {
-    ws,
-    peerId: null,
-    roomId: null,
-    lastSeen: Date.now(),
-  };
-
-  ws.on('message', (data) => {
-    handleMessage(peer, data);
-  });
-
-  ws.on('close', () => {
-    removePeer(peer, 'client_close');
-  });
-
-  ws.on('error', () => {
-    removePeer(peer, 'client_error');
-  });
-});
-
-setInterval(() => {
-  const now = Date.now();
-  for (const room of rooms.values()) {
-    for (const peer of room.values()) {
-      if (now - peer.lastSeen > TIMEOUT_MS) {
-        try {
-          peer.ws.terminate();
-        } catch {
-          // ignore
-        }
-        removePeer(peer, 'timeout');
-      }
+  private sendSnapshotPayloadToChannel(channel: ServerChannel, payload: ArrayBuffer, snapshot?: WorldSnapshot) {
+    if (channel.raw && typeof channel.raw.emit === 'function') {
+      channel.raw.emit(payload);
+    } else if (snapshot) {
+      channel.emit('snapshot', snapshot);
     }
   }
-}, CLEANUP_INTERVAL_MS);
 
-server.listen(PORT);
+  private cloneStateMap(entities: EntityState[]): Map<number, EntityState> {
+    return new Map(
+      entities.map(e => [e.id, { ...e, position: { ...e.position }, velocity: { ...e.velocity }, rotation: { ...e.rotation } }]),
+    );
+  }
+
+  private filterEntitiesForPlayer(player: PlayerEntity, entities: EntityState[]): EntityState[] {
+    const radiusSq = INTEREST_RADIUS * INTEREST_RADIUS;
+    return entities.filter((entity) => {
+      if (entity.id === player.id) return true;
+      const dx = entity.position.x - player.position.x;
+      const dy = entity.position.y - player.position.y;
+      const dz = entity.position.z - player.position.z;
+      return dx * dx + dy * dy + dz * dz <= radiusSq;
+    });
+  }
+}
+
+const game = new GameServer();
+game.start();
+console.log('Game Server started');

@@ -1573,9 +1573,17 @@ export class Renderer {
       }
     }
 
-    // Add draw calls for new objects
+    // Update or add draw calls for objects
     for (const obj of scene.objects) {
-      if (this.dynamicDrawCallCache.has(obj.id)) continue;
+      const existing = this.dynamicDrawCallCache.get(obj.id);
+      if (existing) {
+        // Update model matrix in existing uniform buffer
+        const uniformData = new Float32Array(32);
+        uniformData.set(obj.modelMatrix, 0);
+        uniformData.set(obj.invModelMatrix, 16);
+        this.queue.writeBuffer(existing.uniformBuffer, 0, uniformData);
+        continue;
+      }
 
       const dims = Array.isArray(obj.dims) ? obj.dims : [obj.dims[0], obj.dims[1], obj.dims[2]];
       const [nx, ny, nz] = dims;
