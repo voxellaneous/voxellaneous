@@ -1,5 +1,4 @@
 import { CameraModule } from './camera';
-import { LocalPlayer } from './local-player';
 import './style.css';
 
 import { Renderer } from './renderer';
@@ -115,8 +114,10 @@ async function initializeApp(): Promise<AppData> {
   const cameraModule = new CameraModule(canvas);
   cameraModule.setDirection(vec3.normalize(vec3.create(), [0, 0, 1]));
 
-  const player = new LocalPlayer([3770, 300, 620]);
-  cameraModule.setPosition(player.position as vec3);
+  network.onSpawn((pos) => {
+    cameraModule.setPosition([pos.x, pos.y, pos.z] as vec3);
+    characterController.setFromEyePosition(cameraModule.position);
+  });
 
   const app: AppData = {
     renderer,
@@ -215,47 +216,6 @@ async function initializeApp(): Promise<AppData> {
 
   const markerVoxels = createUniformVoxelData(remoteMarkerSize, 1);
 
-  // Tracking known remote players to avoid unnecessary scene re-uploads
-  const knownRemotePlayers = new Set<string>();
-
-  const updateRemoteScene = () => {
-    const remoteEntities = network.getRemoteEntities();
-    const currentIds = new Set(remoteEntities.map((e) => `remote_${e.id}`));
-
-    let structureChanged = false;
-    for (const id of currentIds) {
-      if (!knownRemotePlayers.has(id)) {
-        structureChanged = true;
-        break;
-      }
-    }
-    if (!structureChanged && knownRemotePlayers.size !== currentIds.size) {
-      structureChanged = true;
-    }
-
-    if (structureChanged) {
-      knownRemotePlayers.clear();
-      currentIds.forEach((id) => knownRemotePlayers.add(id));
-    }
-
-    const remoteObjects = remoteEntities.map((entity) =>
-      createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
-    );
-    const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
-    renderer.uploadScene({
-      palette: [],
-      objects: remoteObjects,
-      heightmapObjects: heightmapChunks,
-    });
-  };
-
-  const remoteSceneInterval = window.setInterval(updateRemoteScene, 100);
-  window.addEventListener('beforeunload', () => {
-    window.clearInterval(remoteSceneInterval);
-  });
-
-  let lastReconciledSeq: number | null = null;
-
   // NOW start render loop after scene is uploaded
   let lastFrameTime = 0;
   const render: FrameRequestCallback = (time) => {
@@ -276,63 +236,51 @@ async function initializeApp(): Promise<AppData> {
       }
     }
 
-    // Send input to server and apply locally via LocalPlayer
-    if (cameraModule.isFocused()) {
-      const cmd = cameraModule.getUserCmd();
-      player.applyUserCmd(cmd, dt);
-      cameraModule.setPosition(player.position as vec3);
-      network.sendInput(cmd, dt);
-    }
-
-    // Server Reconciliation
-    const serverState = network.getMyLatestState();
-    const snapshotSeq = network.getLatestSnapshotSequence();
-    if (serverState && snapshotSeq !== null && snapshotSeq !== lastReconciledSeq) {
-      lastReconciledSeq = snapshotSeq;
-      const pending = network.getPendingInputs();
-      const { x: sx, y: sy, z: sz } = serverState.position;
-      const [px, py, pz] = player.position;
-
-      const ddx = sx - px;
-      const ddy = sy - py;
-      const ddz = sz - pz;
-      const distSq = ddx * ddx + ddy * ddy + ddz * ddz;
-
-      const SNAP_THRESHOLD = 5.0;
-      const CORRECTION_THRESHOLD = 0.5;
-      const LERP_FACTOR = 0.1;
-
-      if (pending.length > 0) {
-        player.setPosition([sx, sy, sz]);
-        for (const input of pending) {
-          player.applyUserCmd(input.cmd, input.dt);
+    // Combine keyboard + touch joystick motion
+    const kbMotion = cameraModule.getInputMotion();
+    if (touchInput) {
+      const joy = touchInput.getJoystickVector();
+      if (joy.forward !== 0 || joy.right !== 0) {
+        const [fx, , fz] = cameraModule.direction;
+        const [rx, , rz] = cameraModule.right;
+        kbMotion[0] += fx * joy.forward + rx * joy.right;
+        kbMotion[2] += fz * joy.forward + rz * joy.right;
+        if (characterController.isFlying) {
+          kbMotion[1] += cameraModule.direction[1] * joy.forward;
         }
-      } else if (distSq > SNAP_THRESHOLD * SNAP_THRESHOLD) {
-        console.warn('Reconciliation hard snap!', distSq);
-        player.setPosition([sx, sy, sz]);
-      } else if (distSq > CORRECTION_THRESHOLD * CORRECTION_THRESHOLD) {
-        const nx = px + (sx - px) * LERP_FACTOR;
-        const ny = py + (sy - py) * LERP_FACTOR;
-        const nz = pz + (sz - pz) * LERP_FACTOR;
-        player.setPosition([nx, ny, nz]);
+        const len = vec3.length(kbMotion);
+        if (len > 1) vec3.scale(kbMotion, kbMotion, 1 / len);
       }
-      cameraModule.setPosition(player.position as vec3);
     }
 
-    // Update terrain chunks based on camera position
-    const terrainChanged = app.terrainManager!.update(cameraModule.position);
-    if (terrainChanged) {
-      const remoteEntities = network.getRemoteEntities();
-      const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
-      const remoteObjects = remoteEntities.map((entity) =>
-        createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
-      );
-      renderer.uploadScene({
-        palette: [],
-        objects: remoteObjects,
-        heightmapObjects: heightmapChunks,
-      });
+    // Client-side physics (gravity, ground collision, fly/walk)
+    if (characterController.isFlying) {
+      if (vec3.length(kbMotion) > 0) {
+        vec3.scale(kbMotion, kbMotion, cameraModule.speed * dt);
+        vec3.add(cameraModule.position, cameraModule.position, kbMotion);
+      }
+    } else {
+      const jumpPressed = cameraModule.isKeyPressed('Space') || (touchInput?.jumpPressed ?? false);
+      const eyePos = characterController.update(dt, kbMotion, jumpPressed, (x, z) => terrainManager.queryHeight(x, z));
+      cameraModule.setPosition(eyePos);
     }
+
+    // Send position to server
+    const [cx, cy, cz] = cameraModule.position;
+    network.sendPosition(cx, cy, cz);
+
+    // Update remote players + terrain every frame for smooth interpolation
+    const remoteEntities = network.getRemoteEntities();
+    const remoteObjects = remoteEntities.map((entity) =>
+      createRemoteMarkerObject(entity.id, entity.position, markerVoxels),
+    );
+    const heightmapChunks = app.terrainManager!.getVisibleHeightmapChunks();
+    app.terrainManager!.update(cameraModule.position);
+    renderer.uploadScene({
+      palette: [],
+      objects: remoteObjects,
+      heightmapObjects: heightmapChunks,
+    });
 
     // Update shadow clipmap from terrain cache and upload dirty levels
     if (shadowClipmap.update(cameraModule.position[0], cameraModule.position[2], terrainManager.cacheGeneration)) {
