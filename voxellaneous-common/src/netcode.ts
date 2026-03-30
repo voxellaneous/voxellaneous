@@ -2,10 +2,7 @@ import { create, toBinary, fromBinary } from '@bufbuild/protobuf';
 import {
   type Vector3 as PbVector3,
   type Quaternion as PbQuaternion,
-  type UserCmd as PbUserCmd,
   type EntityState as PbEntityState,
-  UserCmdPacketSchema,
-  UserCmdSchema,
   NetMessageSchema,
   WorldSnapshotSchema,
   SnapshotDeltaSchema,
@@ -25,16 +22,6 @@ export type Quaternion = {
   y: number;
   z: number;
   w: number;
-};
-
-export type UserCmd = {
-  forward: boolean;
-  backward: boolean;
-  left: boolean;
-  right: boolean;
-  jump: boolean;
-  descend: boolean;
-  viewDir: Vector3;
 };
 
 export type EntityState = {
@@ -91,30 +78,6 @@ function toBytes(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
     : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 }
 
-function cmdToProto(cmd: UserCmd): PbUserCmd {
-  return create(UserCmdSchema, {
-    forward: cmd.forward,
-    backward: cmd.backward,
-    left: cmd.left,
-    right: cmd.right,
-    jump: cmd.jump,
-    descend: cmd.descend,
-    viewDir: vecToProto(cmd.viewDir),
-  });
-}
-
-function protoToCmd(pb: PbUserCmd): UserCmd {
-  return {
-    forward: pb.forward,
-    backward: pb.backward,
-    left: pb.left,
-    right: pb.right,
-    jump: pb.jump,
-    descend: pb.descend,
-    viewDir: protoToVec(pb.viewDir),
-  };
-}
-
 function entityToProto(e: EntityState): PbEntityState {
   return create(EntityStateSchema, {
     id: e.id,
@@ -130,27 +93,6 @@ function protoToEntity(pb: PbEntityState): EntityState {
     position: protoToVec(pb.position),
     velocity: protoToVec(pb.velocity),
     rotation: protoToQuat(pb.rotation),
-  };
-}
-
-export function encodeUserCmdPacket(cmd: UserCmd, sequence: number): ArrayBuffer {
-  const packet = create(UserCmdPacketSchema, {
-    sequence: sequence >>> 0,
-    cmd: cmdToProto(cmd),
-  });
-  const bytes = toBinary(UserCmdPacketSchema, packet);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-}
-
-export function decodeUserCmdPacket(buffer: ArrayBuffer | ArrayBufferView): { sequence: number; cmd: UserCmd } {
-  const packet = fromBinary(UserCmdPacketSchema, toBytes(buffer));
-  return {
-    sequence: packet.sequence,
-    cmd: packet.cmd ? protoToCmd(packet.cmd) : {
-      forward: false, backward: false, left: false,
-      right: false, jump: false, descend: false,
-      viewDir: { x: 0, y: 0, z: 0 },
-    },
   };
 }
 
@@ -221,4 +163,3 @@ export function decodeNetMessage(buffer: ArrayBuffer | ArrayBufferView): Snapsho
 
   throw new Error(`Unknown or empty NetMessage payload case: ${msg.payload.case}`);
 }
-

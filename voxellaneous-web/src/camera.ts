@@ -1,5 +1,4 @@
 import { mat4, vec3 } from 'gl-matrix';
-import type { UserCmd } from '../../voxellaneous-common/src/netcode';
 
 const maxCameraPitch = Math.PI / 2 - 0.1;
 const mouseSensitivity = 0.001;
@@ -206,19 +205,6 @@ export class CameraModule {
     if (vec3.length(motion) === 0) return;
     vec3.scale(motion, motion, this.camera.speed * dt);
     vec3.add(this.camera.position, this.camera.position, motion);
-  }
-
-  getUserCmd(): UserCmd {
-    const dir = this.camera.direction;
-    return {
-      forward: !!this.keysPressedState['KeyW'],
-      backward: !!this.keysPressedState['KeyS'],
-      left: !!this.keysPressedState['KeyA'],
-      right: !!this.keysPressedState['KeyD'],
-      jump: !!this.keysPressedState['Space'],
-      descend: !!this.keysPressedState['ShiftLeft'],
-      viewDir: { x: dir[0], y: dir[1], z: dir[2] },
-    };
   }
 
   update() {
