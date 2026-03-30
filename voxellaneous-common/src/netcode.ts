@@ -85,6 +85,12 @@ function protoToQuat(q: PbQuaternion | undefined): Quaternion {
   return { x: q?.x ?? 0, y: q?.y ?? 0, z: q?.z ?? 0, w: q?.w ?? 0 };
 }
 
+function toBytes(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
+  return buffer instanceof ArrayBuffer
+    ? new Uint8Array(buffer)
+    : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+}
+
 function cmdToProto(cmd: UserCmd): PbUserCmd {
   return create(UserCmdSchema, {
     forward: cmd.forward,
@@ -137,10 +143,7 @@ export function encodeUserCmdPacket(cmd: UserCmd, sequence: number): ArrayBuffer
 }
 
 export function decodeUserCmdPacket(buffer: ArrayBuffer | ArrayBufferView): { sequence: number; cmd: UserCmd } {
-  const bytes = buffer instanceof ArrayBuffer
-    ? new Uint8Array(buffer)
-    : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const packet = fromBinary(UserCmdPacketSchema, bytes);
+  const packet = fromBinary(UserCmdPacketSchema, toBytes(buffer));
   return {
     sequence: packet.sequence,
     cmd: packet.cmd ? protoToCmd(packet.cmd) : {
@@ -186,10 +189,7 @@ export function encodeWorldDelta(delta: SnapshotDelta): ArrayBuffer {
 }
 
 export function decodeNetMessage(buffer: ArrayBuffer | ArrayBufferView): SnapshotDecodeResult {
-  const bytes = buffer instanceof ArrayBuffer
-    ? new Uint8Array(buffer)
-    : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const msg = fromBinary(NetMessageSchema, bytes);
+  const msg = fromBinary(NetMessageSchema, toBytes(buffer));
 
   if (msg.payload.case === 'snapshot') {
     const s = msg.payload.value;
@@ -214,7 +214,7 @@ export function decodeNetMessage(buffer: ArrayBuffer | ArrayBufferView): Snapsho
         lastProcessedInputSeq: d.lastProcessedInputSeq,
         baseSequence: d.baseSequence,
         entities: d.entities.map(protoToEntity),
-        removedIds: [...d.removedIds],
+        removedIds: d.removedIds,
       },
     };
   }
@@ -222,16 +222,3 @@ export function decodeNetMessage(buffer: ArrayBuffer | ArrayBufferView): Snapsho
   throw new Error(`Unknown or empty NetMessage payload case: ${msg.payload.case}`);
 }
 
-// Legacy aliases for compatibility
-export function encodeUserCmd(cmd: UserCmd): ArrayBuffer {
-  const pb = cmdToProto(cmd);
-  const bytes = toBinary(UserCmdSchema, pb);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-}
-
-export function decodeUserCmd(buffer: ArrayBuffer | ArrayBufferView): UserCmd {
-  const bytes = buffer instanceof ArrayBuffer
-    ? new Uint8Array(buffer)
-    : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  return protoToCmd(fromBinary(UserCmdSchema, bytes));
-}

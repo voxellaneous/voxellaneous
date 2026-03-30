@@ -4,7 +4,6 @@ import {
   EntityState,
   UserCmd,
   WorldSnapshot,
-  decodeUserCmd,
   decodeUserCmdPacket,
   encodeWorldSnapshot,
   encodeWorldDelta,
@@ -130,26 +129,9 @@ class GameServer {
 
   private normalizeUserCmdPayload(data: any): ArrayBuffer | ArrayBufferView | null {
     if (!data) return null;
-    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-      return data;
-    }
-    if (Array.isArray(data)) {
-      return new Uint8Array(data);
-    }
-    if (data && data.type === 'Buffer' && Array.isArray(data.data)) {
-      return new Uint8Array(data.data);
-    }
-    if (data && typeof data === 'object' && typeof data.length === 'number') {
-      const len = data.length >>> 0;
-      if (len > 0) {
-        const arr = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-          const v = data[i];
-          arr[i] = typeof v === 'number' ? v : 0;
-        }
-        return arr;
-      }
-    }
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return data;
+    if (Array.isArray(data)) return new Uint8Array(data);
+    if (data.type === 'Buffer' && Array.isArray(data.data)) return new Uint8Array(data.data);
     return null;
   }
 
@@ -228,34 +210,24 @@ class GameServer {
   };
 
   public start() {
-    // Run the loop at roughly 60Hz to ensure we process physics often enough
-    const TICK_RATE_MS = 1000 / 60;
-    setInterval(() => this.tick(), TICK_RATE_MS);
+    setInterval(() => this.tick(), 1000 / 60);
   }
 
   private tick() {
     const now = Date.now();
-    // Frame time limit to prevent "Spiral of Death" if server lags heavily
-    let frameTime = now - this.lastTimestamp;
-    if (frameTime > 250) frameTime = 250;
-
+    let frameTime = Math.min(now - this.lastTimestamp, 250);
     this.lastTimestamp = now;
     this.accumulator += frameTime;
 
-    const PHYSICS_RATE = 60;
-    const PHYSICS_DT_SEC = 1.0 / PHYSICS_RATE;
-    const PHYSICS_DT_MS = 1000 / PHYSICS_RATE;
+    const PHYSICS_DT_SEC = 1 / 60;
+    const PHYSICS_DT_MS = 1000 / 60;
 
-    // Fixed Update Step
     while (this.accumulator >= PHYSICS_DT_MS) {
       this.fixedUpdate(PHYSICS_DT_SEC);
       this.accumulator -= PHYSICS_DT_MS;
     }
 
-    // Network Broadcast Step
-    // Tuning: 60Hz for maximum smoothness/responsiveness (High Bandwidth!)
-    const NETWORK_RATE = 60;
-    const NETWORK_INTERVAL_MS = 1000 / NETWORK_RATE;
+    const NETWORK_INTERVAL_MS = 1000 / 60;
 
     if (now - this.lastNetworkBroadcast >= NETWORK_INTERVAL_MS) {
       this.broadcastSnapshot(now);
@@ -356,13 +328,10 @@ class GameServer {
       players: this.players.size,
     };
     console.log(JSON.stringify(payload));
-    this.metrics.snapshotsSent = 0;
-    this.metrics.deltasSent = 0;
-    this.metrics.bytesSent = 0;
-    this.metrics.snapshotBytes = 0;
-    this.metrics.deltaBytes = 0;
-    this.metrics.cmdDropped = 0;
-    this.metrics.lastLogAt = now;
+    Object.assign(this.metrics, {
+      snapshotsSent: 0, deltasSent: 0, bytesSent: 0,
+      snapshotBytes: 0, deltaBytes: 0, cmdDropped: 0, lastLogAt: now,
+    });
   }
 
   private buildDeltaSnapshot(
@@ -442,88 +411,40 @@ class GameServer {
   }
 
   private simulatePlayer(player: PlayerEntity, dt: number) {
-    const speed = 60; // Match client speed
+    const speed = 60;
     const { input } = player;
 
-    // We must match camera.ts logic EXACTLY
-    // 1. Accumulate motion vector
     let mx = 0;
     let my = 0;
     let mz = 0;
 
     const dirX = input.viewDir?.x || 0;
-    const dirY = input.viewDir?.y || 0; // Unused for horizontal motion
     const dirZ = input.viewDir?.z || 0;
 
-    // Camera Direction - Projected on XZ plane implies ignoring Y
-    // Camera.ts: [x, _, z] = direction.
-    // So we use viewDir as is but only utilize x and z components for Forward/Back.
-    const forwardX = dirX;
-    const forwardZ = dirZ;
-
-    // Client Right vector logic:
-    // vec3.cross(right, dir, up). If up is (0,1,0):
-    // right = (-dirZ, 0, dirX). normalized.
-    // Let's rely on standard math:
+    // Normalize right vector once (perpendicular to forward on XZ plane)
     const rightX = -dirZ;
     const rightZ = dirX;
+    const rightLen = Math.sqrt(rightX * rightX + rightZ * rightZ);
+    const nrX = rightLen > 0 ? rightX / rightLen : 0;
+    const nrZ = rightLen > 0 ? rightZ / rightLen : 0;
 
-    // Note: Since we will normalize the final SUM, we don't strictly need to normalize 'right' yet 
-    // IF the client accumulates un-normalized vectors.
+    if (input.forward)  { mx += dirX; mz += dirZ; }
+    if (input.backward) { mx -= dirX; mz -= dirZ; }
+    if (input.right)    { mx += nrX;  mz += nrZ; }
+    if (input.left)     { mx -= nrX;  mz -= nrZ; }
+    if (input.jump)     { my += 1; }
+    if (input.descend)  { my -= 1; }
 
-    if (input.forward) {
-      mx += forwardX;
-      mz += forwardZ;
-    }
-    if (input.backward) {
-      mx -= forwardX;
-      mz -= forwardZ;
-    }
-    if (input.right) {
-      const len = Math.sqrt(rightX * rightX + rightZ * rightZ);
-      const nrX = len > 0 ? rightX / len : 0;
-      const nrZ = len > 0 ? rightZ / len : 0;
-
-      mx += nrX;
-      mz += nrZ;
-    }
-    if (input.left) {
-      const len = Math.sqrt(rightX * rightX + rightZ * rightZ);
-      const nrX = len > 0 ? rightX / len : 0;
-      const nrZ = len > 0 ? rightZ / len : 0;
-
-      mx -= nrX;
-      mz -= nrZ;
-    }
-
-    if (input.jump) {
-      my += 1;
-    }
-    if (input.descend) {
-      my -= 1;
-    }
-
-    // 2. Normalize entire motion vector
-    // This is the key: (Forward + Right) length > 1, so we must normalize.
     const mLen = Math.sqrt(mx * mx + my * my + mz * mz);
     if (mLen > 0) {
-      mx /= mLen;
-      my /= mLen;
-      mz /= mLen;
+      const moveStep = speed * dt / mLen;
+      player.position.x += mx * moveStep;
+      player.position.y += my * moveStep;
+      player.position.z += mz * moveStep;
 
-      // 3. Scale by Speed * dt
-      const moveStep = speed * dt;
-      mx *= moveStep;
-      my *= moveStep;
-      mz *= moveStep;
-
-      player.position.x += mx;
-      player.position.y += my;
-      player.position.z += mz;
-
-      player.velocity.x = mx / dt;
-      player.velocity.y = my / dt;
-      player.velocity.z = mz / dt;
+      player.velocity.x = mx * speed / mLen;
+      player.velocity.y = my * speed / mLen;
+      player.velocity.z = mz * speed / mLen;
     } else {
       player.velocity.x = 0;
       player.velocity.y = 0;
