@@ -211,8 +211,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Attenuate sharp specular for rough surfaces (approximation for missing pre-filtered mips)
     let spec_atten = 1.0 - PBR_ROUGHNESS * PBR_ROUGHNESS;
 
+    let ambient_color = albedo.rgb * u_lighting.ambient * (normal.y * 0.5 + 0.5);
     let ibl = kd_env * env_diff * albedo.rgb + F_env * env_spec * spec_atten;
-    let lit_color = direct + ibl * u_lighting.ambient;
+    let lit_color = direct + ibl * u_lighting.ambient + ambient_color;
 
     // --- Atmospheric post-effects ---
     let ray = world_pos - cam;
