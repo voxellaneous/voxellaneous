@@ -61,10 +61,11 @@ fn sample_clipmap_height(world_x: f32, world_z: f32, level: i32) -> f32 {
     let u = ctx - fx;
     let v = ctz - fz;
 
-    let ix0 = ((i32(fx) % size) + size) % size;
-    let iz0 = ((i32(fz) % size) + size) % size;
-    let ix1 = (ix0 + 1) % size;
-    let iz1 = (iz0 + 1) % size;
+    let size_mask = size - 1;
+    let ix0 = i32(u32(i32(fx)) & u32(size_mask));
+    let iz0 = i32(u32(i32(fz)) & u32(size_mask));
+    let ix1 = (ix0 + 1) & size_mask;
+    let iz1 = (iz0 + 1) & size_mask;
 
     let h00 = textureLoad(shadow_clipmap_tex, vec2<i32>(ix0, iz0), level, 0).r;
     let h10 = textureLoad(shadow_clipmap_tex, vec2<i32>(ix1, iz0), level, 0).r;
@@ -72,8 +73,8 @@ fn sample_clipmap_height(world_x: f32, world_z: f32, level: i32) -> f32 {
     let h11 = textureLoad(shadow_clipmap_tex, vec2<i32>(ix1, iz1), level, 0).r;
 
     if min(min(h00, h10), min(h01, h11)) < -1e5 {
-        let px = ((i32(round(ctx + 0.5)) % size) + size) % size;
-        let pz = ((i32(round(ctz + 0.5)) % size) + size) % size;
+        let px = i32(u32(i32(round(ctx + 0.5))) & u32(size_mask));
+        let pz = i32(u32(i32(round(ctz + 0.5))) & u32(size_mask));
         return textureLoad(shadow_clipmap_tex, vec2<i32>(px, pz), level, 0).r;
     }
 
@@ -109,6 +110,8 @@ fn sample_height_from(world_x: f32, world_z: f32, min_level: i32) -> f32 {
 }
 
 // Shadow quality constants (replaced at pipeline creation for mobile)
+const SHADOW_CLOSE_SAMPLES: i32 = 8;
+const SHADOW_CLOSE_STEP: f32 = 8.0;
 const SHADOW_NEAR_SAMPLES: i32 = 14;
 const SHADOW_NEAR_STEP: f32 = 32.0;
 const SHADOW_MID_SAMPLES: i32 = 32;
@@ -129,13 +132,27 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     var max_horizon_tan = -1e6;
     let self_y = world_pos.y + 4.0;
 
-    var t = 64.0;
+    // Close-range: level 0 (texel_size=2)
+    var t = 2.0;
+    for (var i = 0; i < SHADOW_CLOSE_SAMPLES; i++) {
+        let sx = world_pos.x + march_dir.x * t;
+        let sz = world_pos.z + march_dir.y * t;
+        let h = sample_clipmap_height(sx, sz, 0);
+        if h > -1e5 {
+            max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
+            if max_horizon_tan >= sun_tan { return 1.0; }
+        }
+        t += SHADOW_CLOSE_STEP;
+    }
+
+    // Near: level 1+
     for (var i = 0; i < SHADOW_NEAR_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
         let h = sample_height_from(sx, sz, 1);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
+            if max_horizon_tan >= sun_tan { return 1.0; }
         }
         t += SHADOW_NEAR_STEP;
     }
@@ -146,6 +163,7 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         let h = sample_height_from(sx, sz, 2);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
+            if max_horizon_tan >= sun_tan { return 1.0; }
         }
         t += SHADOW_MID_STEP;
     }
@@ -153,9 +171,10 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     for (var i = 0; i < SHADOW_FAR_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
-        let h = sample_height_from(sx, sz, 3);
+        let h = sample_clipmap_height(sx, sz, 3);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
+            if max_horizon_tan >= sun_tan { return 1.0; }
         }
         t += SHADOW_FAR_STEP;
     }

@@ -25,6 +25,7 @@ import quadDepthWgsl from './shaders/quad_depth.wgsl?raw';
 import sunOcclusionWgsl from './shaders/sun_occlusion.wgsl?raw';
 import lensFlareWgsl from './shaders/lens_flare.wgsl?raw';
 import lensFlareDownsampleWgsl from './shaders/lens_flare_downsample.wgsl?raw';
+import shadowUpsampleWgsl from './shaders/shadow_upsample.wgsl?raw';
 import envCubemapWgsl from './shaders/env_cubemap.wgsl?raw';
 import envSHReduceWgsl from './shaders/env_sh_reduce.wgsl?raw';
 
@@ -114,6 +115,12 @@ export class Renderer {
   private shadowPipeline!: GPURenderPipeline;
   private shadowLayout!: GPUBindGroupLayout;
   private shadowUniformBuffer!: GPUBuffer;
+
+  // Half-res shadow + bilateral upsample (when shadowScale < 1)
+  private shadowHalfTexture: GPUTexture | null = null;
+  private shadowHalfView: GPUTextureView | null = null;
+  private shadowUpsamplePipeline: GPURenderPipeline | null = null;
+  private shadowUpsampleLayout: GPUBindGroupLayout | null = null;
 
   /** Quality settings (desktop vs mobile) */
   readonly quality!: QualityPreset;
@@ -572,12 +579,14 @@ export class Renderer {
     const shadowShader = device.createShaderModule({
       label: 'Shadow Shader',
       code: patchWgslConstants(quadShadowWgsl, {
-        SHADOW_NEAR_SAMPLES: quality.shadowSamples[0],
-        SHADOW_NEAR_STEP: quality.shadowSteps[0],
-        SHADOW_MID_SAMPLES: quality.shadowSamples[1],
-        SHADOW_MID_STEP: quality.shadowSteps[1],
-        SHADOW_FAR_SAMPLES: quality.shadowSamples[2],
-        SHADOW_FAR_STEP: quality.shadowSteps[2],
+        SHADOW_CLOSE_SAMPLES: quality.shadowSamples[0],
+        SHADOW_CLOSE_STEP: quality.shadowSteps[0],
+        SHADOW_NEAR_SAMPLES: quality.shadowSamples[1],
+        SHADOW_NEAR_STEP: quality.shadowSteps[1],
+        SHADOW_MID_SAMPLES: quality.shadowSamples[2],
+        SHADOW_MID_STEP: quality.shadowSteps[2],
+        SHADOW_FAR_SAMPLES: quality.shadowSamples[3],
+        SHADOW_FAR_STEP: quality.shadowSteps[3],
       }),
     });
     const shadowPipeline = device.createRenderPipeline({
@@ -587,6 +596,37 @@ export class Renderer {
       fragment: { module: shadowShader, entryPoint: 'fs_main', targets: [{ format: 'r8unorm' }] },
       primitive: { topology: 'triangle-list' },
     });
+
+    // Shadow bilateral upsample pipeline (half-res → full-res, depth-aware)
+    let shadowUpsamplePipeline: GPURenderPipeline | null = null;
+    let shadowUpsampleLayout: GPUBindGroupLayout | null = null;
+    if (quality.shadowScale < 1.0) {
+      shadowUpsampleLayout = device.createBindGroupLayout({
+        label: 'Shadow Upsample Layout',
+        entries: [
+          {
+            binding: 0,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: 'unfilterable-float', viewDimension: '2d' },
+          },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth', viewDimension: '2d' } },
+        ],
+      });
+      const shadowUpsampleShader = device.createShaderModule({
+        label: 'Shadow Upsample Shader',
+        code: shadowUpsampleWgsl,
+      });
+      shadowUpsamplePipeline = device.createRenderPipeline({
+        label: 'Shadow Upsample Pipeline',
+        layout: device.createPipelineLayout({
+          label: 'Shadow Upsample Pipeline Layout',
+          bindGroupLayouts: [shadowUpsampleLayout],
+        }),
+        vertex: { module: shadowUpsampleShader, entryPoint: 'vs_main' },
+        fragment: { module: shadowUpsampleShader, entryPoint: 'fs_main', targets: [{ format: 'r8unorm' }] },
+        primitive: { topology: 'triangle-list' },
+      });
+    }
 
     // Grayscale blit pipeline (single-channel texture → grayscale output)
     const quadLayoutGrayscale = device.createBindGroupLayout({
@@ -931,6 +971,17 @@ export class Renderer {
     renderer.shadowBufferTexture = shadowBuf.texture;
     renderer.shadowBufferView = shadowBuf.view;
 
+    // Half-res shadow + bilateral upsample
+    renderer.shadowUpsamplePipeline = shadowUpsamplePipeline;
+    renderer.shadowUpsampleLayout = shadowUpsampleLayout;
+    if (quality.shadowScale < 1.0) {
+      const shW = Math.max(1, Math.round(esW * quality.shadowScale));
+      const shH = Math.max(1, Math.round(esH * quality.shadowScale));
+      const shadowHalf = createRenderTexture(device, shW, shH, 'r8unorm', 'Shadow Half Buffer');
+      renderer.shadowHalfTexture = shadowHalf.texture;
+      renderer.shadowHalfView = shadowHalf.view;
+    }
+
     // Sun occlusion compute resources
     renderer.sunOcclusionPipeline = sunOcclusionPipeline;
     renderer.sunOcclusionLayout = sunOcclusionLayout;
@@ -1040,6 +1091,7 @@ export class Renderer {
     this.gbufferNormalTexture.destroy();
     this.hdrTexture.destroy();
     this.shadowBufferTexture.destroy();
+    this.shadowHalfTexture?.destroy();
     this.skyAerialTexture.destroy();
     this.lensFlareDownTexture.destroy();
 
@@ -1070,6 +1122,14 @@ export class Renderer {
     const shadowBuf = createRenderTexture(this.device, esW, esH, 'r8unorm', 'Shadow Buffer');
     this.shadowBufferTexture = shadowBuf.texture;
     this.shadowBufferView = shadowBuf.view;
+
+    if (this.quality.shadowScale < 1.0) {
+      const shW = Math.max(1, Math.round(esW * this.quality.shadowScale));
+      const shH = Math.max(1, Math.round(esH * this.quality.shadowScale));
+      const shadowHalf = createRenderTexture(this.device, shW, shH, 'r8unorm', 'Shadow Half Buffer');
+      this.shadowHalfTexture = shadowHalf.texture;
+      this.shadowHalfView = shadowHalf.view;
+    }
 
     const skyAerial = createRenderTexture(this.device, width, height, 'rgba16float', 'Sky Aerial');
     this.skyAerialTexture = skyAerial.texture;
@@ -1337,11 +1397,15 @@ export class Renderer {
       }
       this.queue.writeBuffer(this.shadowUniformBuffer, 0, shadowData);
 
+      // Render shadow to half-res if upsampling, otherwise directly to full-res buffer
+      const useHalfRes = this.shadowHalfView != null && this.shadowUpsamplePipeline != null;
+      const shadowTarget = useHalfRes ? this.shadowHalfView! : this.shadowBufferView;
+
       const pass = encoder.beginRenderPass({
         label: 'Shadow Buffer Pass',
         colorAttachments: [
           {
-            view: this.shadowBufferView,
+            view: shadowTarget,
             clearValue: { r: 0, g: 0, b: 0, a: 1 },
             loadOp: 'clear',
             storeOp: 'store',
@@ -1363,6 +1427,33 @@ export class Renderer {
       pass.setBindGroup(0, shadowBind);
       pass.draw(3);
       pass.end();
+
+      // Bilateral upsample: half-res shadow + full-res depth → full-res shadow
+      if (useHalfRes) {
+        const upsamplePass = encoder.beginRenderPass({
+          label: 'Shadow Upsample Pass',
+          colorAttachments: [
+            {
+              view: this.shadowBufferView,
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: 'clear',
+              storeOp: 'store',
+            },
+          ],
+        });
+        const upsampleBind = this.device.createBindGroup({
+          label: 'Shadow Upsample BG',
+          layout: this.shadowUpsampleLayout!,
+          entries: [
+            { binding: 0, resource: this.shadowHalfView! },
+            { binding: 1, resource: this.depthOnlyView },
+          ],
+        });
+        upsamplePass.setPipeline(this.shadowUpsamplePipeline!);
+        upsamplePass.setBindGroup(0, upsampleBind);
+        upsamplePass.draw(3);
+        upsamplePass.end();
+      }
     }
 
     if (presentTarget === 4) {
