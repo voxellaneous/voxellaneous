@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Visual test artifacts (diffs, actual screenshots, traces)
+tests/output/
+test-results/

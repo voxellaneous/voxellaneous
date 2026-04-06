@@ -105,7 +105,7 @@ export const DESKTOP_QUALITY: QualityPreset = {
 export const MOBILE_QUALITY: QualityPreset = {
   voxelMaxSteps: 256,
   heightmapMaxSteps: 128,
-  effectScale: 0.5,
+  effectScale: 1.0,
   shadowSamples: [4, 4, 8, 8],
   shadowSteps: [16, 64, 512, 1024],
   shadowScale: 0.5,

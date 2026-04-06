@@ -132,12 +132,13 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     var max_horizon_tan = -1e6;
     let self_y = world_pos.y + 4.0;
 
-    // Close-range: level 0 (texel_size=2)
+    // Close: level 0 direct, level 1 fallback at data boundaries
     var t = 2.0;
     for (var i = 0; i < SHADOW_CLOSE_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
-        let h = sample_clipmap_height(sx, sz, 0);
+        var h = sample_clipmap_height(sx, sz, 0);
+        if h < -1e5 { h = sample_clipmap_height(sx, sz, 1); }
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
             if max_horizon_tan >= sun_tan { return 1.0; }
@@ -145,11 +146,13 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         t += SHADOW_CLOSE_STEP;
     }
 
-    // Near: level 1+
+    // Near: sample_height_from(0) — uses level 0 where available (same data
+    // source as close tier → no seam), falls back to coarser levels smoothly.
+    // Only 14 samples through the dynamic loop — acceptable cost.
     for (var i = 0; i < SHADOW_NEAR_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
-        let h = sample_height_from(sx, sz, 1);
+        let h = sample_height_from(sx, sz, 0);
         if h > -1e5 {
             max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
             if max_horizon_tan >= sun_tan { return 1.0; }
@@ -157,12 +160,16 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         t += SHADOW_NEAR_STEP;
     }
 
+    // Mid/far: direct sample_clipmap_height — no dynamic loop.
+    // Acne bias compensates for max-height inflation in coarse texels.
+    let acne_bias = 0.02;
+
     for (var i = 0; i < SHADOW_MID_SAMPLES; i++) {
         let sx = world_pos.x + march_dir.x * t;
         let sz = world_pos.z + march_dir.y * t;
-        let h = sample_height_from(sx, sz, 2);
+        let h = sample_clipmap_height(sx, sz, 2);
         if h > -1e5 {
-            max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
+            max_horizon_tan = max(max_horizon_tan, (h - self_y) / t - acne_bias);
             if max_horizon_tan >= sun_tan { return 1.0; }
         }
         t += SHADOW_MID_STEP;
@@ -173,7 +180,7 @@ fn compute_far_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>) -> f32 {
         let sz = world_pos.z + march_dir.y * t;
         let h = sample_clipmap_height(sx, sz, 3);
         if h > -1e5 {
-            max_horizon_tan = max(max_horizon_tan, (h - self_y) / t);
+            max_horizon_tan = max(max_horizon_tan, (h - self_y) / t - acne_bias);
             if max_horizon_tan >= sun_tan { return 1.0; }
         }
         t += SHADOW_FAR_STEP;

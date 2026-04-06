@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Voxellaneous — Visual Test Harness</title>
+    <style>
+      /* No layout shift — canvas is positioned absolutely and sized by JS */
+      body { margin: 0; background: #000; overflow: hidden; }
+      canvas { display: block; }
+      #error { color: #f44; font-family: monospace; padding: 1em; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="error"></div>
+    <script type="module" src="./index.ts"></script>
+  </body>
+</html>
