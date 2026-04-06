@@ -25,4 +25,6 @@ dist-ssr
 
 # Visual test artifacts (diffs, actual screenshots, traces)
 tests/output/
+tests/ci-screenshots/
+tests/ci-output/
 test-results/

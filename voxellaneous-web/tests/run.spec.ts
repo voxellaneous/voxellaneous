@@ -1,14 +1,11 @@
 /**
  * Visual regression tests.
  *
- * For each scenario defined in tests/scenarios/*.ts, this spec:
- *  1. Navigates the harness to that scenario
- *  2. Waits for the renderer to finish settle frames
- *  3. Reads canvas pixels via toBlob() (reliable even with SwiftShader in CI)
- *  4. Compares against the reference image
- *
- * First run (no references):  npx playwright test --update-snapshots
- * Subsequent runs:            npx playwright test
+ * Modes:
+ *   npm run test        — compare screenshots against references (local GPU)
+ *   npm run test:update — accept current output as new references
+ *   npm run test:ci     — smoke test: verify rendering works, save screenshots,
+ *                         skip pixel comparison (SwiftShader can't render correctly)
  */
 
 import { test, expect } from '@playwright/test';
@@ -16,14 +13,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// ---------------------------------------------------------------------------
-// Auto-discover scenario names by parsing `name: '...'` from scenario files.
-// Each file may export a single scenario or an array.
-// ---------------------------------------------------------------------------
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const scenariosDir = path.join(__dirname, 'scenarios');
-const scenarioNames: string[] = [];
+const smokeMode = !!process.env.SMOKE;
 
+// In smoke mode, save screenshots here for the CI artifact upload
+const ciScreenshotsDir = path.join(__dirname, 'ci-screenshots');
+if (smokeMode) {
+  fs.mkdirSync(ciScreenshotsDir, { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// Auto-discover scenario names by parsing `name: '...'` from scenario files.
+// ---------------------------------------------------------------------------
+const scenarioNames: string[] = [];
 for (const file of fs.readdirSync(scenariosDir).filter((f: string) => f.endsWith('.ts'))) {
   const content = fs.readFileSync(path.join(scenariosDir, file), 'utf-8');
   for (const match of content.matchAll(/name:\s*'([^']+)'/g)) {
@@ -36,30 +39,39 @@ for (const file of fs.readdirSync(scenariosDir).filter((f: string) => f.endsWith
 // ---------------------------------------------------------------------------
 for (const name of scenarioNames) {
   test(`visual: ${name}`, async ({ page }) => {
+    const errors: string[] = [];
     page.on('pageerror', (err) => {
+      errors.push(err.message);
       console.error(`[page error] ${err.message}`);
     });
 
     await page.goto(`/tests/harness/index.html?scenario=${name}`);
 
-    // Wait for the harness to signal that all settle frames have rendered
-    // and canvas pixels have been exported via toBlob()
+    // Wait for the harness to complete rendering
     await page.waitForFunction(
       () => (window as unknown as Record<string, unknown>).__TEST_READY === true,
       null,
       { timeout: 30_000 },
     );
 
-    // Read the canvas pixels exported by the harness via toBlob().
-    // This is reliable even in CI where Playwright's compositor-based
-    // screenshot captures blank white (SwiftShader doesn't composite).
+    // Read canvas pixels exported by the harness via toBlob()
     const dataUrl = await page.evaluate(
       () => (window as unknown as Record<string, unknown>).__TEST_SCREENSHOT as string,
     );
 
+    expect(dataUrl, 'harness should export canvas screenshot').toBeTruthy();
     const screenshot = Buffer.from(dataUrl.split(',')[1], 'base64');
-    expect(screenshot).toMatchSnapshot(`${name}.png`, {
-      maxDiffPixelRatio: process.env.CI ? 0.05 : 0.02,
-    });
+
+    if (smokeMode) {
+      // Smoke mode: save screenshot for manual review, skip comparison
+      fs.writeFileSync(path.join(ciScreenshotsDir, `${name}.png`), screenshot);
+      // Fail only on JS errors (WebGPU init failures, shader compile, etc.)
+      expect(errors, 'no page errors during rendering').toEqual([]);
+    } else {
+      // Full mode: pixel comparison against reference
+      expect(screenshot).toMatchSnapshot(`${name}.png`, {
+        maxDiffPixelRatio: 0.02,
+      });
+    }
   });
 }
