@@ -165,9 +165,21 @@ async function run(): Promise<void> {
     if (framesRendered < settleFrames) {
       requestAnimationFrame(loop);
     } else {
-      // Signal Playwright that the canvas is ready for a screenshot
-      (window as unknown as Record<string, unknown>).__TEST_READY = true;
-      console.log(`[test-harness] scenario "${scenarioName}" ready after ${framesRendered} frames`);
+      // Export canvas pixels as a data URL so CI (SwiftShader) can capture
+      // GPU-rendered content even when compositor-based screenshots fail.
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            (window as unknown as Record<string, unknown>).__TEST_SCREENSHOT = reader.result;
+            (window as unknown as Record<string, unknown>).__TEST_READY = true;
+            console.log(`[test-harness] scenario "${scenarioName}" ready after ${framesRendered} frames`);
+          };
+          reader.readAsDataURL(blob);
+        } else {
+          (window as unknown as Record<string, unknown>).__TEST_READY = true;
+        }
+      }, 'image/png');
     }
   }
 

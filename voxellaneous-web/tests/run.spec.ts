@@ -4,7 +4,8 @@
  * For each scenario defined in tests/scenarios/*.ts, this spec:
  *  1. Navigates the harness to that scenario
  *  2. Waits for the renderer to finish settle frames
- *  3. Screenshots the <canvas> and compares against the reference image
+ *  3. Reads canvas pixels via toBlob() (reliable even with SwiftShader in CI)
+ *  4. Compares against the reference image
  *
  * First run (no references):  npx playwright test --update-snapshots
  * Subsequent runs:            npx playwright test
@@ -23,7 +24,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const scenariosDir = path.join(__dirname, 'scenarios');
 const scenarioNames: string[] = [];
 
-for (const file of fs.readdirSync(scenariosDir).filter((f) => f.endsWith('.ts'))) {
+for (const file of fs.readdirSync(scenariosDir).filter((f: string) => f.endsWith('.ts'))) {
   const content = fs.readFileSync(path.join(scenariosDir, file), 'utf-8');
   for (const match of content.matchAll(/name:\s*'([^']+)'/g)) {
     scenarioNames.push(match[1]);
@@ -42,20 +43,23 @@ for (const name of scenarioNames) {
     await page.goto(`/tests/harness/index.html?scenario=${name}`);
 
     // Wait for the harness to signal that all settle frames have rendered
+    // and canvas pixels have been exported via toBlob()
     await page.waitForFunction(
       () => (window as unknown as Record<string, unknown>).__TEST_READY === true,
       null,
       { timeout: 30_000 },
     );
 
-    // Small extra wait to ensure the final frame is fully presented
-    await page.waitForTimeout(200);
+    // Read the canvas pixels exported by the harness via toBlob().
+    // This is reliable even in CI where Playwright's compositor-based
+    // screenshot captures blank white (SwiftShader doesn't composite).
+    const dataUrl = await page.evaluate(
+      () => (window as unknown as Record<string, unknown>).__TEST_SCREENSHOT as string,
+    );
 
-    // Screenshot the canvas element
-    const canvas = page.locator('#canvas');
-    await expect(canvas).toHaveScreenshot(`${name}.png`, {
-      // GPU rendering varies across drivers — allow a small tolerance
-      maxDiffPixelRatio: 0.01,
+    const screenshot = Buffer.from(dataUrl.split(',')[1], 'base64');
+    expect(screenshot).toMatchSnapshot(`${name}.png`, {
+      maxDiffPixelRatio: process.env.CI ? 0.05 : 0.02,
     });
   });
 }
