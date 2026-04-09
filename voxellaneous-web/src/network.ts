@@ -54,6 +54,12 @@ export class NetworkClient {
         this.handleSnapshot(data as WorldSnapshot);
       });
 
+      this.channel.on('chat', (data: any) => {
+        if (data && typeof data.playerId === 'number' && typeof data.text === 'string') {
+          this.chatCallback?.(data);
+        }
+      });
+
       this.channel.on('pong', (data: any) => {
         if (!data || typeof data.clientTime !== 'number') return;
         this.lastRttMs = Date.now() - data.clientTime;
@@ -87,6 +93,17 @@ export class NetworkClient {
     if (!this.isConnected) return;
     this.channel.emit('position', { x, y, z, yaw }, { reliable: false });
   }
+
+  public sendChat(text: string) {
+    if (!this.isConnected) return;
+    this.channel.emit('chat', { text }, { reliable: true });
+  }
+
+  public onChat(cb: (msg: { playerId: number; text: string }) => void): void {
+    this.chatCallback = cb;
+  }
+
+  private chatCallback: ((msg: { playerId: number; text: string }) => void) | null = null;
 
   private applySnapshot(snapshot: WorldSnapshot) {
     this.lastSnapshotSeq = snapshot.sequence;

@@ -143,6 +143,7 @@ async function initializeApp(): Promise<AppData> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 
   const network = new NetworkClient({ url: `http://${window.location.hostname}` });
+  (window as any).__network = network;
 
   const quality = isMobileDevice() ? MOBILE_QUALITY : DESKTOP_QUALITY;
   const renderer = await Renderer.new(canvas, quality);
@@ -445,6 +446,73 @@ async function initializeApp(): Promise<AppData> {
 
   initializeDevTools(app, profilerData);
 
+  // -- Chat ---------------------------------------------------------------
+  const chatLog = document.createElement('div');
+  Object.assign(chatLog.style, {
+    position: 'fixed', bottom: '48px', left: '12px',
+    maxWidth: '400px', maxHeight: '200px', overflowY: 'auto',
+    display: 'flex', flexDirection: 'column', gap: '2px',
+    pointerEvents: 'auto', zIndex: '10',
+  });
+  document.body.appendChild(chatLog);
+
+  const chatInput = document.createElement('input');
+  Object.assign(chatInput.style, {
+    position: 'fixed', bottom: '12px', left: '12px',
+    width: '380px', padding: '6px 10px',
+    background: 'rgba(0,0,0,0.6)', color: '#fff',
+    border: '1px solid rgba(255,255,255,0.2)', borderRadius: '4px',
+    fontFamily: 'monospace', fontSize: '13px',
+    display: 'none', zIndex: '10', outline: 'none',
+  });
+  chatInput.placeholder = 'Type a message...';
+  document.body.appendChild(chatInput);
+
+  function addChatMessage(playerId: number, text: string) {
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      background: 'rgba(0,0,0,0.5)', color: '#fff',
+      padding: '3px 8px', borderRadius: '3px',
+      fontFamily: 'monospace', fontSize: '13px',
+      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+    });
+    const color = playerColorFromId(playerId);
+    el.innerHTML = `<span style="color:rgb(${color[0]},${color[1]},${color[2]})">#${playerId}</span> ${text.replace(/</g, '&lt;')}`;
+    chatLog.appendChild(el);
+    // Keep last 50 messages
+    while (chatLog.children.length > 50) chatLog.removeChild(chatLog.firstChild!);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  network.onChat((msg) => addChatMessage(msg.playerId, msg.text));
+
+  // Press Enter to open chat, Enter to send, Escape to cancel
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Enter' && chatInput.style.display === 'none') {
+      chatInput.style.display = 'block';
+      chatInput.focus();
+      chatInput.value = '';
+      e.preventDefault();
+    }
+  });
+
+  chatInput.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // don't trigger game controls
+    if (e.code === 'Enter') {
+      const text = chatInput.value.trim();
+      if (text) network.sendChat(text);
+      chatInput.style.display = 'none';
+      chatInput.blur();
+    } else if (e.code === 'Escape') {
+      chatInput.style.display = 'none';
+      chatInput.blur();
+    }
+  });
+
+  // Expose for MCP bot
+  (window as any).__sendChat = (text: string) => network.sendChat(text);
+  (window as any).__onChat = (cb: (msg: { playerId: number; text: string }) => void) => network.onChat(cb);
+
   // Hide loading indicator
   document.getElementById('loading')?.classList.add('hidden');
 
@@ -452,3 +520,6 @@ async function initializeApp(): Promise<AppData> {
 }
 
 export const App = await initializeApp();
+
+// Expose for external control (MCP bot eye, dev tools)
+(window as any).__game = App;

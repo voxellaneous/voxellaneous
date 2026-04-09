@@ -86,6 +86,24 @@ class GameServer {
       channel.emit('pong', { clientTime, serverTime: Date.now() });
     });
 
+    channel.on('chat', (data: any) => {
+      if (!data || typeof data.text !== 'string') return;
+      const text = data.text.slice(0, 200); // cap length
+      const msg = { playerId, text };
+      // Broadcast to all players within interest radius
+      for (const other of this.players.values()) {
+        if (other.id === playerId) continue;
+        const dx = other.position.x - player.position.x;
+        const dy = other.position.y - player.position.y;
+        const dz = other.position.z - player.position.z;
+        if (dx * dx + dy * dy + dz * dz <= INTEREST_RADIUS * INTEREST_RADIUS) {
+          other.channel.emit('chat', msg, { reliable: true });
+        }
+      }
+      // Echo back to sender too
+      channel.emit('chat', msg, { reliable: true });
+    });
+
     channel.on('resync', () => {
       this.forceFullForPlayer.add(playerId);
       this.lastSnapshotStateByPlayer.delete(playerId);

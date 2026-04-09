@@ -8,13 +8,17 @@
     "start": "node dist/server.js",
     "dev": "tsx server.ts",
     "build": "tsc",
-    "bots": "tsx scripts/bot-clients.ts"
+    "bots": "tsx scripts/bot-clients.ts",
+    "mcp": "tsx mcp/server.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.0.0",
     "@geckos.io/server": "^3.0.2",
     "@geckos.io/client": "^3.0.2",
-    "ws": "^8.16.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "playwright": "^1.50.0",
+    "ws": "^8.16.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

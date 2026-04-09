@@ -8,10 +8,12 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["node"]
   },
   "include": [
     "server.ts",
+    "mcp/**/*.ts",
     "../voxellaneous-common/src/**/*.ts"
   ]
 }
