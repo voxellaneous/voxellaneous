@@ -398,12 +398,11 @@ server.prompt(
 // ---------------------------------------------------------------------------
 
 async function main() {
-  // Start MCP transport first so Claude sees the server immediately
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log('MCP server ready');
 
-  // Connect bot in background — tools wait via ensureReady()
+  // Start connecting bot in background so it's ready when tools are called
   bot.connect().catch(e => log(`Bot connect failed: ${e}`));
 
   process.on('SIGINT', async () => {

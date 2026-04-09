@@ -30,7 +30,7 @@ foreach ($bot in $bots) {
         param($dir, $prompt, $name)
         Set-Location $dir
         $env:BOT_NAME = $name
-        claude --model sonnet --no-session-persistence --allowedTools "mcp__voxellaneous-bot__*" --system-prompt $prompt --print "You are $name. Start by calling get_world, then act. Never stop." 2>&1
+        claude --model sonnet --no-session-persistence --strict-mcp-config --mcp-config mcp-bot.json --allowedTools "mcp__voxellaneous-bot__*" --system-prompt $prompt --print "You are $name. Start by calling get_world, then act. Never stop." 2>&1
     } -ArgumentList $PSScriptRoot, $prompt, $name
     $jobs += $job
 }
