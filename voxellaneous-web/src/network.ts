@@ -56,7 +56,7 @@ export class NetworkClient {
 
       this.channel.on('chat', (data: any) => {
         if (data && typeof data.playerId === 'number' && typeof data.text === 'string') {
-          this.chatCallback?.(data);
+          this.chatCallback?.({ playerId: data.playerId, name: data.name || '', text: data.text });
         }
       });
 
@@ -99,11 +99,16 @@ export class NetworkClient {
     this.channel.emit('chat', { text }, { reliable: true });
   }
 
-  public onChat(cb: (msg: { playerId: number; text: string }) => void): void {
+  public setName(name: string) {
+    if (!this.isConnected) return;
+    this.channel.emit('setName', { name }, { reliable: true });
+  }
+
+  public onChat(cb: (msg: { playerId: number; name: string; text: string }) => void): void {
     this.chatCallback = cb;
   }
 
-  private chatCallback: ((msg: { playerId: number; text: string }) => void) | null = null;
+  private chatCallback: ((msg: { playerId: number; name: string; text: string }) => void) | null = null;
 
   private applySnapshot(snapshot: WorldSnapshot) {
     this.lastSnapshotSeq = snapshot.sequence;

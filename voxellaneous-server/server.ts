@@ -10,10 +10,11 @@ import {
 
 const PORT = Number.parseInt(process.env.PORT || '8080', 10);
 const PLAYER_TIMEOUT_MS = Number.parseInt(process.env.PLAYER_TIMEOUT_MS || '300000', 10);
-const INTEREST_RADIUS = Number.parseInt(process.env.INTEREST_RADIUS || '1000', 10);
+const INTEREST_RADIUS = Number.parseInt(process.env.INTEREST_RADIUS || '32000', 10);
 
 type PlayerEntity = {
   id: number;
+  name: string;
   position: { x: number; y: number; z: number };
   velocity: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number; w: number };
@@ -63,6 +64,7 @@ class GameServer {
 
     const player: PlayerEntity = {
       id: playerId,
+      name: `Player ${playerId}`,
       position: { x: 3770, y: 300, z: 620 },
       velocity: { x: 0, y: 0, z: 0 },
       rotation: { x: 0, y: 0, z: 0, w: 1 },
@@ -86,10 +88,16 @@ class GameServer {
       channel.emit('pong', { clientTime, serverTime: Date.now() });
     });
 
+    channel.on('setName', (data: any) => {
+      if (data && typeof data.name === 'string') {
+        player.name = data.name.slice(0, 20);
+      }
+    });
+
     channel.on('chat', (data: any) => {
       if (!data || typeof data.text !== 'string') return;
-      const text = data.text.slice(0, 200); // cap length
-      const msg = { playerId, text };
+      const text = data.text.slice(0, 200);
+      const msg = { playerId, name: player.name, text };
       // Broadcast to all players within interest radius
       for (const other of this.players.values()) {
         if (other.id === playerId) continue;

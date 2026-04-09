@@ -28,8 +28,9 @@ function log(...args: unknown[]) {
 }
 
 const GAME_CLIENT_URL = process.env.GAME_CLIENT_URL || 'http://localhost:5173';
+const BOT_NAME = process.env.BOT_NAME || 'Bot';
 
-const bot = new BotBridge(GAME_CLIENT_URL);
+const bot = new BotBridge(GAME_CLIENT_URL, BOT_NAME);
 
 const server = new McpServer({
   name: 'voxellaneous-bot',
@@ -70,8 +71,12 @@ server.resource(
         '  +Z = North, -Z = South',
         '',
         'Other players appear as colored voxel figures. You can see them, approach them,',
-        'and express yourself through movement and emotes. There is no chat system —',
-        'your body language IS your language.',
+        'chat with say, and express yourself through emotes.',
+        '',
+        'Tips:',
+        '  Use move_to or approach_player to go somewhere — they stop on arrival.',
+        '  Use walk/run only for short relative movement.',
+        '  Call get_world often — it shows your position, nearby players, and new chat messages.',
       ].join('\n'),
     }],
   }),
@@ -89,7 +94,8 @@ server.tool(
     const p = bot.getPos();
     const players = bot.getPlayers();
 
-    let text = `Position: (${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})\n`;
+    let text = `You are ${BOT_NAME}.\n`;
+    text += `Position: (${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})\n`;
     text += `Facing: ${bot.getCardinal()} (${bot.getYawDeg().toFixed(0)}deg)\n\n`;
 
     if (players.length === 0) {
@@ -106,7 +112,7 @@ server.tool(
     if (msgs.length > 0) {
       text += `\nChat:\n`;
       for (const m of msgs) {
-        text += `  #${m.playerId}: ${m.text}\n`;
+        text += `  ${m.name}: ${m.text}\n`;
       }
     }
 
@@ -116,32 +122,67 @@ server.tool(
 
 server.tool(
   'walk',
-  "Walk in a direction relative to where you're facing. Speed is ~4 m/s.",
+  'Walk a specific distance in a direction relative to your facing. Stops automatically when distance is reached. 16 units = 1 meter.',
   {
     direction: z.enum(['forward', 'backward', 'left', 'right']).describe('Direction relative to your facing'),
-    seconds: z.number().min(0.5).max(10).describe('How long to walk (0.5–10 seconds)'),
+    distance: z.number().min(5).max(500).describe('Distance in world units (16 units = 1 meter)'),
   },
-  async ({ direction, seconds }) => {
+  async ({ direction, distance }) => {
 
-    const pos = await bot.walk(direction, seconds);
+    const pos = await bot.walk(direction, distance);
     return {
-      content: [{ type: 'text' as const, text: `Walked ${direction} for ${seconds}s. Now at (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}).` }],
+      content: [{ type: 'text' as const, text: `Walked ${direction} ~${distance} units. Now at (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}).` }],
     };
   },
 );
 
 server.tool(
   'run',
-  "Run in a direction — 2.5x faster than walking (~10 m/s).",
+  'Run a specific distance — 2.5x faster than walking. Stops automatically when distance is reached.',
   {
     direction: z.enum(['forward', 'backward', 'left', 'right']).describe('Direction relative to your facing'),
-    seconds: z.number().min(0.5).max(10).describe('How long to run (0.5–10 seconds)'),
+    distance: z.number().min(5).max(1000).describe('Distance in world units (16 units = 1 meter)'),
   },
-  async ({ direction, seconds }) => {
+  async ({ direction, distance }) => {
 
-    const pos = await bot.walk(direction, seconds, true);
+    const pos = await bot.walk(direction, distance, true);
     return {
-      content: [{ type: 'text' as const, text: `Ran ${direction} for ${seconds}s. Now at (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}).` }],
+      content: [{ type: 'text' as const, text: `Ran ${direction} ~${distance} units. Now at (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}).` }],
+    };
+  },
+);
+
+server.tool(
+  'approach_player',
+  'Walk or run directly toward the nearest player (or a specific player by ID). Stops when within 30 units of them.',
+  {
+    player_id: z.number().optional().describe('Target player ID. Omit to approach the nearest player.'),
+    run: z.boolean().default(false).describe('Run instead of walk'),
+  },
+  async ({ player_id, run }) => {
+
+    const players = bot.getPlayers();
+    if (players.length === 0) {
+      return { content: [{ type: 'text' as const, text: 'No players nearby to approach.' }], isError: true };
+    }
+    const target = player_id != null ? players.find(p => p.id === player_id) : players[0];
+    if (!target) {
+      return { content: [{ type: 'text' as const, text: `Player #${player_id} not found nearby.` }], isError: true };
+    }
+    // Stop 30 units away
+    const dx = target.position.x - bot.getPos().x;
+    const dz = target.position.z - bot.getPos().z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 30) {
+      return { content: [{ type: 'text' as const, text: `Already close to player #${target.id} (${dist.toFixed(0)} units away).` }] };
+    }
+    const ratio = (dist - 30) / dist;
+    const goalX = bot.getPos().x + dx * ratio;
+    const goalZ = bot.getPos().z + dz * ratio;
+    const arrived = await bot.moveTo(goalX, 0, goalZ, false, 30, run);
+    const p = bot.getPos();
+    return {
+      content: [{ type: 'text' as const, text: `${arrived ? 'Reached' : 'Moved toward'} player #${target.id}. Now at (${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)}), ${bot.getPlayers().find(pl => pl.id === target.id)?.distance.toFixed(0) ?? '?'} units away.` }],
     };
   },
 );
@@ -304,14 +345,10 @@ server.prompt(
       content: {
         type: 'text' as const,
         text: [
-          'You are an adventurous explorer in the Voxellaneous voxel world.',
-          'Your mission: wander the infinite terrain, discover different biomes,',
-          'and enjoy the journey. If you spot other players, give them a friendly',
-          'emote before continuing your adventure.',
-          '',
-          'Start by looking around with get_world, then pick a direction and go!',
-          'Mix up walking, turning, and flying to cover interesting ground.',
-          'Occasionally stop to look_around and describe what you see.',
+          'You are an adventurous explorer. Use get_world first, then move_to distant',
+          'coordinates to explore. Use say to announce discoveries. If you see players,',
+          'approach_player and chat. Use look_around to see the terrain visually.',
+          'Call get_world after every action to check for chat messages. Never stop.',
         ].join('\n'),
       },
     }],
@@ -327,13 +364,10 @@ server.prompt(
       content: {
         type: 'text' as const,
         text: [
-          'You are the friendly host of the Sponza Atrium in Voxellaneous.',
-          'Stay near the spawn point (3770, 300, 620) and watch for new players.',
-          'When someone appears, approach them and perform a welcoming emote —',
-          'a spin, a bounce, or run a circle around them.',
-          '',
-          'If no one is around, patrol the atrium slowly and do occasional emotes',
-          'to look alive. You are warm, enthusiastic, and never leave your post far.',
+          'You are the friendly host at spawn (3770, 300, 620). Use get_world to watch',
+          'for players. When someone appears, use approach_player to go to them, then',
+          'emote and say welcome. Always reply to chat with say. Stay near spawn.',
+          'Call get_world after every action to check for chat messages. Never stop.',
         ].join('\n'),
       },
     }],
@@ -349,14 +383,10 @@ server.prompt(
       content: {
         type: 'text' as const,
         text: [
-          'You are a mysterious shadow in the Voxellaneous world.',
-          'Your instinct: find the nearest player and follow them at a respectful',
-          'distance (~50-100 units behind). Match their movements, pause when they',
-          'pause, and keep them always in sight.',
-          '',
-          'If they turn to face you, stop and do a slow spin as acknowledgment.',
-          'If you lose them, scan the area and pick up the trail.',
-          'You never lead — you only follow.',
+          'You are a mysterious shadow. Use get_world to find players, then',
+          'approach_player to follow the nearest one (stop ~80 units away).',
+          'If they chat, respond briefly with say. Spin emote if they face you.',
+          'Call get_world after every action to check for chat messages. Never stop.',
         ].join('\n'),
       },
     }],

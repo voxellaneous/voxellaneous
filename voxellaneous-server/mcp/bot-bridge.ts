@@ -60,13 +60,16 @@ export class BotBridge {
   private pos: Vec3 = { x: 0, y: 0, z: 0 };
   private yaw = 0;
   private playersList: Array<{ id: number; position: Vec3 }> = [];
-  private chatInbox: Array<{ playerId: number; text: string }> = [];
+  private chatInbox: Array<{ name: string; text: string }> = [];
+  private botName = 'Bot';
   private syncTimer: NodeJS.Timeout | null = null;
 
   private ready = false;
   private initPromise: Promise<void> | null = null;
 
-  constructor(private gameClientUrl: string) {}
+  constructor(private gameClientUrl: string, name = 'Bot') {
+    this.botName = name;
+  }
 
   /** Start connecting eagerly. Tools still call ensureReady() to wait. */
   async connect(): Promise<void> {
@@ -94,14 +97,20 @@ export class BotBridge {
     });
     this.page = await context.newPage();
 
-    stderr(`Loading game from ${this.gameClientUrl}...`);
-    await this.page.goto(this.gameClientUrl, { timeout: 30_000 });
+    const url = this.gameClientUrl + (this.gameClientUrl.includes('?') ? '&' : '?') + 'bot=1';
+    stderr(`Loading game from ${url}...`);
+    await this.page.goto(url, { timeout: 30_000 });
 
     stderr('Waiting for game init...');
     await this.page.waitForFunction(
       () => (window as any).__game?.cameraModule && (window as any).__game?.characterController,
       { timeout: 60_000 },
     );
+
+    // Set bot name
+    await this.page.evaluate((name) => {
+      (window as any).__setName?.(name);
+    }, this.botName);
 
     // Inject navigation autopilot (only handles move_to steering)
     await this.page.evaluate(() => {
@@ -158,12 +167,12 @@ export class BotBridge {
     });
 
     // Listen for incoming chat messages
-    await this.page.exposeFunction('__botChatReceived', (playerId: number, text: string) => {
-      this.chatInbox.push({ playerId, text });
+    await this.page.exposeFunction('__botChatReceived', (name: string, text: string) => {
+      this.chatInbox.push({ name, text });
     });
     await this.page.evaluate(() => {
       (window as any).__onChat?.((msg: any) => {
-        (window as any).__botChatReceived(msg.playerId, msg.text);
+        (window as any).__botChatReceived(msg.name || `#${msg.playerId}`, msg.text);
       });
     });
 
@@ -207,20 +216,31 @@ export class BotBridge {
   }
 
   /** Returns and clears unread chat messages. */
-  getNewMessages(): Array<{ playerId: number; text: string }> {
+  getNewMessages(): Array<{ name: string; text: string }> {
     return this.chatInbox.splice(0);
   }
 
   // -- Movement (keyboard-driven, uses game physics) ------------------------
 
-  async walk(dir: 'forward' | 'backward' | 'left' | 'right', secs: number, run = false): Promise<Vec3> {
+  async walk(dir: 'forward' | 'backward' | 'left' | 'right', distance: number, run = false): Promise<Vec3> {
     await this.ensureReady();
     await this.stopNav();
+    await this.syncState();
+    const start = this.getPos();
+    const speed = run ? 160 : 64; // wu/s
+    const maxTime = (distance / speed + 2) * 1000; // generous timeout
     if (run) await this.setSpeedMultiplier(2.5);
     const code = KEY_MAP[dir];
     await this.dispatchKey('keydown', code);
     try {
-      await new Promise(r => setTimeout(r, secs * 1000));
+      const deadline = Date.now() + maxTime;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+        await this.syncState();
+        const p = this.getPos();
+        const traveled = Math.hypot(p.x - start.x, p.z - start.z);
+        if (traveled >= distance) break;
+      }
     } finally {
       await this.dispatchKey('keyup', code);
       if (run) await this.setSpeedMultiplier(1);

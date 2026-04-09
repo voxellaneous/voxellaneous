@@ -153,6 +153,14 @@ async function initializeApp(): Promise<AppData> {
   network.onSpawn((pos) => {
     cameraModule.setPosition([pos.x, pos.y, pos.z] as vec3);
     characterController.setFromEyePosition(cameraModule.position);
+
+    // Set player name (skip for bots)
+    if (!new URLSearchParams(window.location.search).has('bot')) {
+      const saved = localStorage.getItem('playerName');
+      const name = saved || prompt('Enter your name:') || 'Player';
+      localStorage.setItem('playerName', name);
+      network.setName(name);
+    }
   });
 
   const app: AppData = {
@@ -444,7 +452,9 @@ async function initializeApp(): Promise<AppData> {
   };
   registerRecurringAnimation(render);
 
-  initializeDevTools(app, profilerData);
+  if (!new URLSearchParams(window.location.search).has('bot')) {
+    initializeDevTools(app, profilerData);
+  }
 
   // -- Chat ---------------------------------------------------------------
   const chatLog = document.createElement('div');
@@ -468,7 +478,7 @@ async function initializeApp(): Promise<AppData> {
   chatInput.placeholder = 'Type a message...';
   document.body.appendChild(chatInput);
 
-  function addChatMessage(playerId: number, text: string) {
+  function addChatMessage(playerId: number, name: string, text: string) {
     const el = document.createElement('div');
     Object.assign(el.style, {
       background: 'rgba(0,0,0,0.5)', color: '#fff',
@@ -477,14 +487,14 @@ async function initializeApp(): Promise<AppData> {
       whiteSpace: 'pre-wrap', wordBreak: 'break-word',
     });
     const color = playerColorFromId(playerId);
-    el.innerHTML = `<span style="color:rgb(${color[0]},${color[1]},${color[2]})">#${playerId}</span> ${text.replace(/</g, '&lt;')}`;
+    const label = name || `#${playerId}`;
+    el.innerHTML = `<span style="color:rgb(${color[0]},${color[1]},${color[2]})">${label.replace(/</g, '&lt;')}</span> ${text.replace(/</g, '&lt;')}`;
     chatLog.appendChild(el);
-    // Keep last 50 messages
     while (chatLog.children.length > 50) chatLog.removeChild(chatLog.firstChild!);
     chatLog.scrollTop = chatLog.scrollHeight;
   }
 
-  network.onChat((msg) => addChatMessage(msg.playerId, msg.text));
+  network.onChat((msg) => addChatMessage(msg.playerId, msg.name, msg.text));
 
   // Press Enter to open chat, Enter to send, Escape to cancel
   window.addEventListener('keydown', (e) => {
@@ -511,7 +521,8 @@ async function initializeApp(): Promise<AppData> {
 
   // Expose for MCP bot
   (window as any).__sendChat = (text: string) => network.sendChat(text);
-  (window as any).__onChat = (cb: (msg: { playerId: number; text: string }) => void) => network.onChat(cb);
+  (window as any).__setName = (name: string) => network.setName(name);
+  (window as any).__onChat = (cb: (msg: { playerId: number; name: string; text: string }) => void) => network.onChat(cb);
 
   // Hide loading indicator
   document.getElementById('loading')?.classList.add('hidden');
